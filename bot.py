@@ -802,5 +802,342 @@ async def start_phase_monitor(g: discord.Guild, u: discord.Member, phase_key: st
             pass
     return intro_emb, f"✅ Starting message sent & Live Oversight active for {u.mention} (`{title}`)!"
 
+# =====================================================================
+# PART 5 OF 5 — PASTE DIRECTLY BELOW PART 4 (FAR LEFT EDGE)
+# =====================================================================
+async def finish_monitor_and_report(bot: commands.Bot, g: discord.Guild, uid: int, notify_ch=None, aborted_reason: str = "") -> None:
+    """Grades a completed Phase 1-3 live oversight session and sends the full dossier to Developers."""
+    sess = ACTIVE_MONITORS.pop((g.id, uid), None)
+    if not sess:
+        return
+
+    phase_key = sess["phase_key"]
+    title, pass_pct, scope, _, _ = MONITOR_PHASES[phase_key]
+    total_sec = time.time() - sess["started_at"]
+    c = gcfg(g.id)
+    rep_ch = g.get_channel(c.get("report_ch", 0))
+    dev_ping = f"<@&{c['dev_role']}>" if c.get("dev_role") else "**Developers**"
+    member = g.get_member(uid) or discord.Object(id=uid)
+
+    if aborted_reason:
+        if notify_ch:
+            try:
+                await notify_ch.send(f"🛑 Live oversight for <@{uid}> (`{title}`) cancelled: `{aborted_reason}`.")
+            except Exception:
+                pass
+        if rep_ch:
+            try:
+                await rep_ch.send(f"🛑 {dev_ping} — Live oversight for <@{uid}> (`{title}`) was aborted (`{aborted_reason}`).")
+            except Exception:
+                pass
+        return
+
+    res = await grade_monitor(phase_key, member, sess["events"])
+    raw_txt = build_monitor_transcript(phase_key, member, sess["events"], res, total_sec)
+    fname = f"oversight-{phase_key}-{uid}-{datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%d-%H%M')}.txt"
+
+    cand = c["candidates"].setdefault(str(uid), {"history": [], "passed": []})
+    cand["history"].append({"exam": phase_key, "score": res["score_pct"], "verdict": res["verdict"], "ts": int(time.time())})
+    cand["history"] = cand["history"][-20:]
+    save_db()
+
+    v = res["verdict"]
+    col = discord.Color.green() if v == "PASS" else (discord.Color.gold() if "BORDERLINE" in v else discord.Color.red())
+    badge = "🟢 RECOMMENDED PASS" if v == "PASS" else ("🟡 BORDERLINE / REVIEW" if "BORDERLINE" in v else "🔴 RECOMMENDED FAIL")
+
+    rep_emb = discord.Embed(
+        title=f"👁️ DEVELOPER LIVE OVERSIGHT REPORT — {badge}",
+        description=(
+            f"👤 **Moderation Member:** <@{uid}> (ID: `{uid}`)\n"
+            f"📋 **Phase:** `{title}` (`{scope}` monitoring)\n"
+            f"📊 **Observed Actions:** `{len(sess['events'])}` • ⏱️ **Duration:** `{int(total_sec//60)}m {int(total_sec%60)}s`\n"
+            f"🧠 **Grader:** `{res['grader']}`"
+        ),
+        color=col,
+        timestamp=discord.utils.utcnow(),
+    )
+    if isinstance(member, discord.Member):
+        rep_emb.set_thumbnail(url=member.display_avatar.url)
+    rep_emb.add_field(name="🎯 Performance Score", value=f"**`{res['score_pct']}%`** *(Pass: `{pass_pct}%`)*", inline=True)
+    rep_emb.add_field(name="⚖️ Auto-Verdict", value=f"**`{v}`**", inline=True)
+    rep_emb.add_field(name="🚩 Red Flags", value=f"`{len(res['red_flags'])}` flagged", inline=True)
+    rep_emb.add_field(name="🧠 Overseer Summary", value=res["summary"][:950], inline=False)
+    rep_emb.add_field(name="📝 Monitored Ticket / Mod Breakdown", value="\n".join(f"• {x}" for x in res["breakdown"][:12])[:1000] or "See dossier", inline=False)
+    if res["red_flags"]:
+        rep_emb.add_field(name="⚠️ Performance Red Flags", value="\n".join(f"• {f}" for f in res["red_flags"])[:900], inline=False)
+    rep_emb.set_footer(text=f"ExamKey:{phase_key} | CandidateID:{uid} • Developers: Click below to finalize!")
+
+    if rep_ch:
+        try:
+            await rep_ch.send(content=f"📣 {dev_ping} — Live oversight report ready for <@{uid}> (`{title}`)!", embed=rep_emb, file=discord.File(io.BytesIO(raw_txt), filename=fname), view=DevVerdictView())
+        except Exception as e:
+            print(f"Monitor report error: {e}")
+
+    target_ch = notify_ch or g.get_channel(sess.get("req_ch_id", 0))
+    if target_ch:
+        try:
+            await target_ch.send(f"✅ **Live Oversight Complete for <@{uid}> (`{title}`)!**\n🎯 **Score:** **`{res['score_pct']}%`** (`{v}`) across `{len(sess['events'])}` action(s).\n📣 Full dossier sent to **Developers**!")
+        except Exception:
+            pass
+
+
+async def start_exam_session(i: discord.Interaction, exam_key: str) -> None:
+    """Routes Phases 1-3 to Live Operational Oversight and Phases 4-5 / Admin tracks to Exam Rooms."""
+    if exam_key in MONITOR_PHASES:
+        emb, note = await start_phase_monitor(i.guild, i.user, exam_key, i.channel, requested_by=i.user)
+        if not emb:
+            return await i.followup.send(note, ephemeral=True)
+        await i.channel.send(content=f"📣 {i.user.mention} — **Your Official Phase Starting Introduction:**", embed=emb, view=MonitorControlView())
+        return await i.followup.send(note, ephemeral=True)
+
+    exam_ch, intro_emb, note = await launch_exam_room(i.guild, i.user, exam_key, requested_by=i.user)
+    if exam_ch and intro_emb:
+        await i.channel.send(content=f"📣 {i.user.mention} — **Phase Request Accepted! Head into {exam_ch.mention}:**", embed=intro_emb)
+    await i.followup.send(note, ephemeral=True)
+
+
+async def finish_and_report(bot: commands.Bot, ch: discord.TextChannel, sess: dict, aborted_reason: str = "") -> None:
+    """Grades the completed exam, sends full report + transcript to Developers, and closes the room."""
+    ACTIVE_EXAMS.pop(ch.id, None)
+    g, u, exam_key = ch.guild, ch.guild.get_member(sess["user_id"]), sess["exam_key"]
+    title, pass_pct, _, _ = EXAMS[exam_key]
+    total_sec = time.time() - sess["started_at"]
+    c = gcfg(g.id)
+    rep_ch = g.get_channel(c.get("report_ch", 0))
+    dev_ping = f"<@&{c['dev_role']}>" if c.get("dev_role") else "**Developers**"
+
+    if aborted_reason:
+        await ch.send(f"🛑 **Exam Terminated:** `{aborted_reason}`. Reporting to Developers & closing room in 8s...")
+        if rep_ch:
+            await rep_ch.send(f"🛑 {dev_ping} — <@{sess['user_id']}> **forfeited/aborted** `{title}` (`{aborted_reason}`) after `{len(sess['answers'])}` answer(s).")
+        await asyncio.sleep(8)
+        try:
+            await ch.delete(reason=f"Exam aborted: {aborted_reason}")
+        except Exception:
+            pass
+        return
+
+    await ch.send("⏳ **All answers locked!** Overseer is strictly grading your exam and transmitting the report to **Developers**...")
+    res = await grade_exam(exam_key, u or discord.Object(id=sess["user_id"]), sess["answers"])
+    raw_txt = build_exam_transcript(exam_key, u or discord.Object(id=sess["user_id"]), sess["answers"], res, total_sec)
+    fname = f"exam-{exam_key}-{sess['user_id']}-{datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%d-%H%M')}.txt"
+
+    cand = c["candidates"].setdefault(str(sess["user_id"]), {"history": [], "passed": []})
+    cand["history"].append({"exam": exam_key, "score": res["score_pct"], "verdict": res["verdict"], "ts": int(time.time())})
+    cand["history"] = cand["history"][-20:]
+    save_db()
+
+    v = res["verdict"]
+    col = discord.Color.green() if v == "PASS" else (discord.Color.gold() if "BORDERLINE" in v else discord.Color.red())
+    badge = "🟢 RECOMMENDED PASS" if v == "PASS" else ("🟡 BORDERLINE / ORAL INTERVIEW" if "BORDERLINE" in v else "🔴 RECOMMENDED FAIL")
+
+    rep_emb = discord.Embed(
+        title=f"📊 DEVELOPER EXAM REPORT — {badge}",
+        description=f"👤 **Candidate:** <@{sess['user_id']}> (ID: `{sess['user_id']}`)\n📋 **Track:** `{title}` (`{exam_key}`)\n⏱️ **Duration:** `{int(total_sec//60)}m {int(total_sec%60)}s` • 🧠 **Grader:** `{res['grader']}`",
+        color=col,
+        timestamp=discord.utils.utcnow(),
+    )
+    if u:
+        rep_emb.set_thumbnail(url=u.display_avatar.url)
+    rep_emb.add_field(name="🎯 Score", value=f"**`{res['score_pct']}%`** *(Pass: `{pass_pct}%`)*", inline=True)
+    rep_emb.add_field(name="⚖️ Auto-Verdict", value=f"**`{v}`**", inline=True)
+    rep_emb.add_field(name="🚩 Red Flags", value=f"`{len(res['red_flags'])}` detected", inline=True)
+    rep_emb.add_field(name="🧠 Examiner Summary", value=res["summary"][:950], inline=False)
+    rep_emb.add_field(name="📝 Per-Question Breakdown", value="\n".join(f"• {x}" for x in res["breakdown"][:13])[:1000] or "See transcript", inline=False)
+    if res["red_flags"]:
+        rep_emb.add_field(name="⚠️ Anti-Cheat & Red-Flag Alerts", value="\n".join(f"• {f}" for f in res["red_flags"])[:900], inline=False)
+    rep_emb.set_footer(text=f"ExamKey:{exam_key} | CandidateID:{sess['user_id']} • Developers: Use buttons below to finalize!")
+
+    if rep_ch:
+        try:
+            await rep_ch.send(content=f"📣 {dev_ping} — New graded exam submitted by <@{sess['user_id']}>!", embed=rep_emb, file=discord.File(io.BytesIO(raw_txt), filename=fname), view=DevVerdictView())
+        except Exception as e:
+            print(f"Report send error: {e}")
+
+    await ch.send(f"✅ **Exam Submitted & Reported to Developers!**\n🎯 **Score:** **`{res['score_pct']}%`** (`{v}`)\n📣 Developers will DM your official verdict. Closing room in **12s**...")
+    await asyncio.sleep(12)
+    try:
+        await ch.delete(reason=f"Exam completed ({res['score_pct']}%)")
+    except Exception:
+        pass
+
+
+# --- 5. PERSISTENT INTERACTIVE VIEWS ---
+class ExamSelect(discord.ui.Select):
+    def __init__(self):
+        options = [
+            discord.SelectOption(label="Phase 1 — Live Ticket Response Oversight", value="phase1", emoji="🎫", description="Monitors how you respond to real tickets (Pass: 85%)"),
+            discord.SelectOption(label="Phase 2 — Live Chat & Mod Oversight", value="phase2", emoji="👁️", description="Monitors public chat handling & mod actions (Pass: 85%)"),
+            discord.SelectOption(label="Phase 3 — Hybrid Ticket + Mod Oversight", value="phase3", emoji="🔎", description="Monitors tickets, forensics & mod actions (Pass: 88%)"),
+            discord.SelectOption(label="Phase 4 — Live Ambush & Stress Test (5Q)", value="phase4", emoji="⚡", description="Written/scenario ambush room (Pass: 88%)"),
+            discord.SelectOption(label="Phase 5 — Chief Admin Final Board (4Q)", value="phase5", emoji="🏛️", description="Final board + Phase 1-4 audit dossier (Pass: 90%)"),
+            discord.SelectOption(label="Staff Gauntlet (3 Hard Questions)", value="staff3", emoji="👥", description="Pass: 85% • High-pressure Staff entry exam"),
+            discord.SelectOption(label="Admin Vetting Exam (10 Questions)", value="admin10", emoji="🛡️", description="Pass: 90% • Technical & ethical Admin screening"),
+            discord.SelectOption(label="Chief Administrative — HELL MODE (11Q)", value="chief11", emoji="🔥", description="Pass: 92% • Brutal executive crisis & IA gauntlet"),
+            discord.SelectOption(label="Full Administrator Exam (13 Questions)", value="admin13", emoji="⚔️", description="Pass: 88% • Full 13-question Admin mastery exam"),
+        ]
+        super().__init__(placeholder="🔥 Select a Phase or Exam to Request...", min_values=1, max_values=1, options=options, custom_id="ccx:select")
+
+    async def callback(self, i: discord.Interaction):
+        await i.response.defer(ephemeral=True)
+        await start_exam_session(i, self.values[0])
+
+
+class ExamRequestPanel(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(ExamSelect())
+
+
+class MonitorControlView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    def _parse(self, emb):
+        ft = (emb.footer.text if emb and emb.footer else "") or ""
+        km, um = re.search(r"MonitorKey:([a-z0-9]+)", ft), re.search(r"CandidateID:(\d+)", ft)
+        return (km.group(1) if km else "phase1"), (int(um.group(1)) if um else 0)
+
+    @discord.ui.button(label="Grade & Report to Devs Now", style=discord.ButtonStyle.success, emoji="📊", custom_id="ccmon:finish")
+    async def b_fin(self, i: discord.Interaction, b: discord.ui.Button):
+        _, uid = self._parse(i.message.embeds[0] if i.message.embeds else None)
+        if not (is_dev_or_admin(i.user) or i.user.id == uid):
+            return await i.response.send_message("❌ Developers or the monitored member only.", ephemeral=True)
+        sess = ACTIVE_MONITORS.get((i.guild.id, uid))
+        if not sess:
+            return await i.response.send_message("⚠️ No active live monitor found.", ephemeral=True)
+        if not sess["events"] and not is_dev_or_admin(i.user):
+            return await i.response.send_message("⚠️ Complete at least 1 monitored ticket/chat response first!", ephemeral=True)
+        for item in self.children:
+            item.disabled = True
+        await i.response.edit_message(view=self)
+        asyncio.create_task(finish_monitor_and_report(i.client, i.guild, uid, notify_ch=i.channel))
+
+    @discord.ui.button(label="Take Written Drill Instead", style=discord.ButtonStyle.primary, emoji="📝", custom_id="ccmon:exam")
+    async def b_exam(self, i: discord.Interaction, b: discord.ui.Button):
+        ekey, uid = self._parse(i.message.embeds[0] if i.message.embeds else None)
+        if not (is_dev_or_admin(i.user) or i.user.id == uid):
+            return await i.response.send_message("❌ Developers or candidate only.", ephemeral=True)
+        await i.response.defer(ephemeral=True)
+        ACTIVE_MONITORS.pop((i.guild.id, uid), None)
+        _, _, note = await launch_exam_room(i.guild, i.guild.get_member(uid) or i.user, ekey, requested_by=i.user)
+        await i.followup.send(note, ephemeral=True)
+
+    @discord.ui.button(label="Dev: Cancel Oversight", style=discord.ButtonStyle.danger, emoji="🛑", custom_id="ccmon:abort")
+    async def b_ab(self, i: discord.Interaction, b: discord.ui.Button):
+        if not is_dev_or_admin(i.user):
+            return await i.response.send_message("❌ Developers / Admins only.", ephemeral=True)
+        _, uid = self._parse(i.message.embeds[0] if i.message.embeds else None)
+        for item in self.children:
+            item.disabled = True
+        await i.response.edit_message(view=self)
+        asyncio.create_task(finish_monitor_and_report(i.client, i.guild, uid, notify_ch=i.channel, aborted_reason=f"Cancelled by {i.user.display_name}"))
+
+
+class LiveExamControls(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Dev: Abort & Flag Exam", style=discord.ButtonStyle.danger, emoji="🛑", custom_id="ccx:abort")
+    async def b_abort(self, i: discord.Interaction, b: discord.ui.Button):
+        if not is_dev_or_admin(i.user):
+            return await i.response.send_message("❌ Developers / Admins only.", ephemeral=True)
+        sess = ACTIVE_EXAMS.get(i.channel.id)
+        if not sess:
+            return await i.response.send_message("⚠️ No active exam in this channel.", ephemeral=True)
+        await i.response.send_message(f"🛑 Aborted by {i.user.mention}.", ephemeral=True)
+        asyncio.create_task(finish_and_report(i.client, i.channel, sess, aborted_reason=f"Terminated by Dev {i.user.display_name}"))
+
+
+class DevVerdictView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    def _parse(self, emb):
+        ft = (emb.footer.text if emb and emb.footer else "") or ""
+        km, um = re.search(r"ExamKey:([a-z0-9]+)", ft), re.search(r"CandidateID:(\d+)", ft)
+        return (km.group(1) if km else "unknown"), (int(um.group(1)) if um else 0)
+
+    async def _decide(self, i: discord.Interaction, status: str, color: discord.Color, dm_msg: str, grant_pass: bool = False):
+        if not is_dev_or_admin(i.user):
+            return await i.response.send_message("❌ Developers / Administrators only.", ephemeral=True)
+        emb = i.message.embeds[0]
+        ekey, uid = self._parse(emb)
+        etitle = EXAMS[ekey][0] if ekey in EXAMS else ekey
+        if grant_pass and uid:
+            c = gcfg(i.guild.id)
+            cand = c["candidates"].setdefault(str(uid), {"history": [], "passed": []})
+            if ekey not in cand["passed"]:
+                cand["passed"].append(ekey)
+            save_db()
+            role, mem = i.guild.get_role(c.get("approved_role", 0)), i.guild.get_member(uid)
+            if role and mem and ekey in ("phase5", "staff3", "admin10", "chief11", "admin13"):
+                try:
+                    await mem.add_roles(role, reason=f"Passed {etitle} (Approved by {i.user})")
+                except Exception:
+                    pass
+        for item in self.children:
+            item.disabled = True
+        emb.color = color
+        emb.add_field(name="🏛️ Final Developer Decision", value=f"**{status}** by {i.user.mention}", inline=False)
+        await i.response.edit_message(embed=emb, view=self)
+        if uid:
+            try:
+                usr = i.guild.get_member(uid) or await i.client.fetch_user(uid)
+                await usr.send(f"🔥 **Chicago Crossfire — Official Exam Result ({etitle})**\n**Decision:** {status}\n{dm_msg}")
+            except Exception:
+                pass
+
+    @discord.ui.button(label="Approve & Advance", style=discord.ButtonStyle.success, emoji="✅", custom_id="ccdv:pass")
+    async def b_pass(self, i: discord.Interaction, b: discord.ui.Button):
+        await self._decide(i, "✅ APPROVED / PASSED", discord.Color.brand_green(), "Congratulations! Developers have approved your phase and advanced your clearance.", grant_pass=True)
+
+    @discord.ui.button(label="Require Oral Board", style=discord.ButtonStyle.primary, emoji="🎙️", custom_id="ccdv:oral")
+    async def b_oral(self, i: discord.Interaction, b: discord.ui.Button):
+        await self._decide(i, "🎙️ ORAL INTERVIEW REQUIRED", discord.Color.gold(), "Developers have reviewed your submission and require a live oral board interrogation before final approval.")
+
+    @discord.ui.button(label="Fail Candidate", style=discord.ButtonStyle.danger, emoji="❌", custom_id="ccdv:fail")
+    async def b_fail(self, i: discord.Interaction, b: discord.ui.Button):
+        await self._decide(i, "❌ FAILED", discord.Color.dark_red(), "Your phase did not meet Chicago Crossfire standards. Review server protocols before re-requesting.")
+
+
+# --- 6. BOT CORE, LIVE LISTENERS & SLASH COMMANDS ---
+class ExamOverseerBot(commands.Bot):
+    def __init__(self, mi: bool = True, mem_i: bool = True):
+        it = discord.Intents.default()
+        it.message_content, it.members = mi, mem_i
+        super().__init__(command_prefix="!", intents=it, help_command=None)
+        self._synced = False
+
+    async def setup_hook(self):
+        for v in (ExamRequestPanel(), MonitorControlView(), LiveExamControls(), DevVerdictView()):
+            self.add_view(v)
+        if not self._synced:
+            try:
+                await self.tree.sync()
+                self._synced = True
+            except Exception as e:
+                print(f"Sync notice: {e}")
+
+    async def on_ready(self):
+        global BOT_STATUS
+        BOT_STATUS = f"ONLINE as {self.user}"
+        print(f"✅ Chicago Crossfire Exam Overseer ONLINE as {self.user}")
+        try:
+            await self.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name="Chicago Crossfire Oversight 🔥"))
+        except Exception:
+            pass
+
+    async def _log_audit_mod_action(self, g: discord.Guild, action_enum: discord.AuditLogAction, label: str, target_str: str):
+        if not any(gid == g.id and s["scope"] in ("public", "both") for (gid, _), s in ACTIVE_MONITORS.items()):
+            return
+        try:
+            async for entry in g.audit_logs(limit=3, action=action_enum):
+                if (discord.utils.utcnow() - entry.created_at).total_seconds() <= 10 and entry.user:
+                    sess = ACTIVE_MONITORS.get((g.id, entry.user.id))
+                    if sess and sess["scope"] in ("public", "both"):
+                        sess["events"].append({"kind": "mod_action", "channel": "audit-log", "action": label, "target": target_str, "reason": entry.reason or "None", "ts": time.time()})
+                  
+
 
 
