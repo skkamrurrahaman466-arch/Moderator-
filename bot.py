@@ -286,3 +286,226 @@ EXAMS = {
     ),
 }
 
+# =====================================================================
+# PART 3 OF 5 — PASTE DIRECTLY BELOW PART 2 (FAR LEFT EDGE)
+# =====================================================================
+EXAMS["admin13"] = (
+    "Full Administrator Exam (13 Hardcore Questions)", 88, 25, [
+        ("List your verified Admin+ track record and detail one real crisis you solved—including what went wrong and what you'd do faster.", ["crisis", "resolve", "faster", "mistake", "experience"]),
+        ("Explain the exact risks of Manage Roles, Manage Webhooks, Manage Server, and Administrator—and how a rogue Manage Webhooks user ruins a server without Send Messages.", ["webhook", "role", "administrator", "spam", "nuke", "impersonat"]),
+        ("Our Auto-Mod bot fails to auto-ban a rogue Senior Mod spamming scam links. Diagnose BOTH technical reasons and the exact fix.", ["hierarchy", "role", "above", "permission", "ban", "top"]),
+        ("A Trial Mod escalates an URGENT ticket mixing a mass-exploiter, missing Gamepass claim, and staff misconduct complaint. How do you separate, investigate, and route all three?", ["separate", "dev", "chief", "proof", "transcript", "verify"]),
+        ("Walk through your exact order of Discord actions during a 30-account raid without mass-banning legitimate players.", ["pause", "invite", "verification", "lock", "id", "age", "ban"]),
+        ("A rival faction submits 3 screenshots accusing a PD Commander of corrupt DMs and powergaming. Give 4 technical checks to detect framing/impersonation.", ["id", "impersonat", "inspect", "context", "log", "video", "verify"]),
+        ("A Phase 3 Trial Mod ignores proof rules and argues in tickets after 1 warning. Give your exact decision (retrain vs. fail) and write the exact DM.", ["proof", "fail", "demote", "professional", "reason", "reapply"]),
+        ("A weapon nerf triggers 15 players spamming 'L DEVS' and mass-pinging Devs in #general. Regain control in 60s without unfairly locking the whole server.", ["slowmode", "redirect", "feedback", "warn", "ping", "calm"]),
+        ("Ownership is offline during 3 failures: (A) Bloxlink fails to sync, (B) Ticket Bot crashes mid-rush, (C) Google Form webhook gets spammed. Detail all 3 fixes.", ["manual", "role", "fallback", "delete", "webhook", "notify", "dev"]),
+        ("A furious user accuses YOU of power-tripping in #general in front of 50 people. Write your exact public reply, private step, and why silently deleting looks guilty.", ["ticket", "calm", "audit", "log", "transparent", "chief", "guilty"]),
+        ("A player you banned 3 weeks ago submits a mature Ban Appeal. Should YOU alone decide it? Explain conflict-of-interest appeals.", ["conflict", "bias", "another", "admin", "second", "unbiased"]),
+        ("Diagnose 2 real operational weaknesses in growing Chicago RP servers and design a concrete Admin-run fix for both.", ["activity", "shift", "ticket", "bias", "system", "track"]),
+        ("State your daily active window (with timezone), accept instant termination for any unlogged abuse/leak/bias, and prove in 3 sharp sentences why Chicago Crossfire is safer with you.", ["timezone", "active", "blacklist", "accountab", "audit", "safe"]),
+    ],
+)
+
+
+def load_db() -> dict:
+    """Loads persisted server configuration and candidate grading records."""
+    try:
+        return json.load(open(DB_FILE, encoding="utf-8")) if os.path.exists(DB_FILE) else {}
+    except Exception:
+        return {}
+
+
+def save_db() -> None:
+    """Persists database safely to disk."""
+    try:
+        json.dump(DB, open(DB_FILE, "w", encoding="utf-8"), indent=2)
+    except Exception:
+        pass
+
+
+DB = load_db()
+
+
+def gcfg(gid: int) -> dict:
+    return DB.setdefault(
+        str(gid),
+        {"dev_role": 0, "report_ch": 0, "exam_cat": 0, "approved_role": 0, "candidates": {}},
+    )
+
+
+def is_dev_or_admin(m: discord.Member) -> bool:
+    """True for Administrators or members with the configured Developer Role."""
+    if not isinstance(m, discord.Member):
+        return False
+    if m.guild_permissions.administrator:
+        return True
+    drid = gcfg(m.guild.id).get("dev_role", 0)
+    return bool(drid and any(r.id == drid for r in m.roles))
+
+
+def is_ticket_channel(ch) -> bool:
+    """Detects whether a Discord channel is an active support/report/appeal ticket."""
+    name = (getattr(ch, "name", "") or "").lower()
+    topic = (getattr(ch, "topic", "") or "").lower()
+    return name.startswith(TICKET_PFX) or any(k in topic for k in ("ccticket", "ruleticket", "ticketsys", "ticket |", "appeal"))
+
+
+def build_starting_intro_embed(
+    g: discord.Guild,
+    u: discord.Member | None,
+    phase_key: str,
+    requested_by: discord.Member = None,
+    exam_ch: discord.TextChannel = None,
+    is_monitor: bool = False,
+) -> discord.Embed:
+    """Builds the official Starting Message & Phase Introduction embed with Candidate Avatar."""
+    info = PHASE_INTROS[phase_key]
+    cand_line = f"👤 **Candidate:** {u.mention} (`{u.display_name}` | ID: `{u.id}`)" if u else "👤 **Candidate:** *Open Phase Briefing*"
+    req_line = f"\n📨 **Requested By:** {requested_by.mention}" if (requested_by and u and requested_by.id != u.id) else ""
+    room_line = f"\n🚪 **Assigned Exam Room:** {exam_ch.mention}" if exam_ch else ""
+
+    if is_monitor and phase_key in MONITOR_PHASES:
+        _, pass_pct, scope, target_n, _ = MONITOR_PHASES[phase_key]
+        mode_line = f"📡 **Mode:** Live Operational Monitoring (`{scope.upper()}`) • 🎯 **Goal:** `{target_n}` actions • ✅ **Pass:** `{pass_pct}%`"
+    else:
+        _, pass_pct, min_w, questions = EXAMS[phase_key]
+        mode_line = f"📝 **Mode:** Overseen Exam Room • 📋 **Questions:** `{len(questions)}` • ✍️ **Min:** `{min_w}w` • ✅ **Pass:** `{pass_pct}%`"
+
+    emb = discord.Embed(
+        title=info["banner"],
+        description=f"{cand_line}{req_line}{room_line}\n{mode_line}\n\n{info['intro']}",
+        color=info["color"],
+        timestamp=discord.utils.utcnow(),
+    )
+    emb.add_field(name="🎯 Phase Objectives & Requirements", value=info["objective"], inline=False)
+    emb.add_field(name="⚠️ Strict Rules & Instant-Fail Policy", value=info["rules"], inline=False)
+    emb.add_field(
+        name="📊 Developer Oversight & Grading",
+        value="Every response, timing metric, and action is logged and auto-graded, then transmitted with a full `.txt` dossier straight to **Chicago Crossfire Developers**.",
+        inline=False,
+    )
+
+    if u:
+        avatar_url = u.display_avatar.url
+        emb.set_author(name=f"Chicago Crossfire Oversight — {u.display_name}", icon_url=avatar_url)
+        emb.set_thumbnail(url=avatar_url)
+        footer_prefix = f"MonitorKey:{phase_key} | CandidateID:{u.id}" if is_monitor else f"ExamKey:{phase_key} | CandidateID:{u.id}"
+        emb.set_footer(text=f"{footer_prefix} • Chicago Crossfire Automated Overseer")
+    else:
+        if g and g.icon:
+            emb.set_thumbnail(url=g.icon.url)
+        emb.set_footer(text=f"Track:{phase_key} • Chicago Crossfire Automated Overseer")
+
+    if phase_key == "phase5" and u and g:
+        cand = gcfg(g.id)["candidates"].get(str(u.id), {})
+        past = "\n".join(f"• `{h['exam']}`: **{h['score']}%** (`{h['verdict']}`)" for h in cand.get("history", [])[-6:]) or "*No prior phases recorded yet*"
+        emb.add_field(name="📁 Prior Trial Phase History (Phases 1–4)", value=past, inline=False)
+
+    return emb
+
+
+# --- 2. 24/7 KEEP-ALIVE WEB SERVER & SELF-PINGER ---
+async def run_web():
+    app = web.Application()
+    fn = lambda r: web.Response(text=f"Chicago Crossfire Exam Overseer 24/7 | Up:{int((time.time()-START_TIME)//60)}m | {BOT_STATUS}")
+    app.router.add_get("/", fn)
+    app.router.add_get("/health", fn)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    await web.TCPSite(runner, "0.0.0.0", int(os.environ.get("PORT", 10000))).start()
+
+
+async def self_ping():
+    await asyncio.sleep(25)
+    url = os.environ.get("RENDER_EXTERNAL_URL") or f"http://127.0.0.1:{os.environ.get('PORT', 10000)}/"
+    async with aiohttp.ClientSession() as s:
+        while True:
+            try:
+                async with s.get(url, timeout=10):
+                    pass
+            except Exception:
+                pass
+            await asyncio.sleep(240)
+
+
+# --- 3. WRITTEN EXAM GRADING ENGINE ---
+def local_grade_exam(exam_key: str, answers: list[dict]) -> dict:
+    """Strict built-in rubric grader that scores concept coverage, depth & anti-cheat flags."""
+    title, pass_pct, min_words, questions = EXAMS[exam_key]
+    notes, red_flags = [], []
+    total_pts = 0.0
+
+    for idx, ans in enumerate(answers):
+        txt, low, words, elapsed = ans["text"], ans["text"].lower(), len(ans["text"].split()), ans["seconds"]
+        concepts = questions[idx][1]
+        hits = sum(1 for c in concepts if c in low)
+        concept_ratio = min(1.0, hits / max(1, min(len(concepts), 4)))
+        depth_ratio = min(1.0, words / max(min_words * 1.4, 30))
+        pts = round((concept_ratio * 6.0) + (depth_ratio * 4.0), 1)
+
+        if words >= 85 and elapsed < 6:
+            red_flags.append(f"Q{idx+1}: Pasted {words} words in {elapsed:.1f}s (Possible Copy-Paste/AI)")
+            pts = max(0.0, pts - 1.5)
+        if any(f in low for f in AI_FLAGS):
+            red_flags.append(f"Q{idx+1}: Robotic/AI phrasing detected")
+            pts = max(0.0, pts - 2.0)
+        if words < min_words:
+            red_flags.append(f"Q{idx+1}: Low-effort answer ({words} words)")
+            pts = min(pts, 4.0)
+
+        total_pts += pts
+        notes.append(f"Q{idx+1}: {pts}/10 ({hits}/{len(concepts)} key concepts, {words}w, {int(elapsed)}s)")
+
+    pct = round((total_pts / (len(questions) * 10.0)) * 100, 1)
+    verdict = "PASS" if pct >= pass_pct and len(red_flags) < 2 else ("BORDERLINE / INTERVIEW" if pct >= pass_pct - 8 else "FAIL")
+    summary = f"Strict Rubric Score: {pct}% (Pass threshold: {pass_pct}%). {'Strong technical & policy alignment.' if verdict == 'PASS' else 'Missing critical protocols, depth, or triggered red flags.'}"
+    return {"score_pct": pct, "verdict": verdict, "summary": summary, "red_flags": red_flags[:8], "breakdown": notes, "grader": "Local Strict Rubric"}
+
+
+async def grade_exam(exam_key: str, member, answers: list[dict]) -> dict:
+    """Grades the full exam using Gemini AI if configured, with automatic Local Rubric fallback."""
+    local_res = local_grade_exam(exam_key, answers)
+    if not GEMINI_KEY:
+        return local_res
+
+    title, pass_pct, min_words, questions = EXAMS[exam_key]
+    qa_text = "\n\n".join(
+        f"Q{i+1} ({questions[i][0]})\nExpected Concepts: {', '.join(questions[i][1])}\n"
+        f"Candidate Answer ({a['seconds']:.1f}s, {len(a['text'].split())}w): {a['text'][:900]}"
+        for i, a in enumerate(answers)
+    )
+    sys_p = (
+        "You are the ruthless Chief Administrative & Developer Exam Grader for Chicago Crossfire (Roblox RP). "
+        f"Exam: '{title}' | Pass Threshold: {pass_pct}% | Min Words: {min_words}. "
+        "Grade STRICTLY. Penalize vague answers, bias, missing proof protocols, or AI-generated essays. "
+        "Return ONLY valid JSON: {\"score_pct\": number (0-100), \"verdict\": \"PASS\"|\"BORDERLINE / INTERVIEW\"|\"FAIL\", "
+        "\"summary\": \"2-3 sharp sentences for Developers\", \"red_flags\": [\"short red flag\"], "
+        "\"breakdown\": [\"Q1: X/10 - brief note\"]}"
+    )
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_KEY}"
+    body = {
+        "contents": [{"parts": [{"text": f"CANDIDATE: {member} ({member.id})\n\n{qa_text}"}]}],
+        "systemInstruction": {"parts": [{"text": sys_p}]},
+        "generationConfig": {"temperature": 0.15, "responseMimeType": "application/json"},
+    }
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.post(url, json=body, timeout=28) as r:
+                if r.status == 200:
+                    d = json.loads((await r.json())["candidates"][0]["content"]["parts"][0]["text"].strip())
+                    ai_flags = list(d.get("red_flags", [])) + [f for f in local_res["red_flags"] if "Pasted" in f]
+                    return {
+                        "score_pct": float(d.get("score_pct", local_res["score_pct"])),
+                        "verdict": str(d.get("verdict", local_res["verdict"])).upper(),
+                        "summary": str(d.get("summary", local_res["summary"]))[:800],
+                        "red_flags": ai_flags[:8],
+                        "breakdown": [str(x)[:140] for x in d.get("breakdown", local_res["breakdown"])][:15],
+                        "grader": "Gemini AI Strict Examiner",
+                    }
+    except Exception:
+        pass
+    return local_res
+
+
+
