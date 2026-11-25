@@ -507,5 +507,300 @@ async def grade_exam(exam_key: str, member, answers: list[dict]) -> dict:
         pass
     return local_res
 
+# =====================================================================
+# PART 4 OF 5 — PASTE DIRECTLY BELOW PART 3 (FAR LEFT EDGE)
+# =====================================================================
+def build_exam_transcript(exam_key: str, member, answers: list[dict], res: dict, total_sec: float) -> bytes:
+    """Exports full Q&A, timing forensics, and grading breakdown to a .txt file for Developers."""
+    title, pass_pct, _, questions = EXAMS[exam_key]
+    now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    lines = [
+        "================================================================",
+        "   CHICAGO CROSSFIRE — OFFICIAL EXAM & GRADING REPORT           ",
+        "================================================================",
+        f"Exam        : {title}",
+        f"Candidate   : {member} (ID: {member.id})",
+        f"Completed   : {now} | Total Time: {int(total_sec // 60)}m {int(total_sec % 60)}s",
+        f"Grader      : {res['grader']}",
+        f"Final Score : {res['score_pct']}% (Pass Requirement: {pass_pct}%)",
+        f"Verdict     : {res['verdict']}",
+        f"Summary     : {res['summary']}",
+        "Red Flags   : " + ("; ".join(res["red_flags"]) if res["red_flags"] else "None"),
+        "================================================================\n",
+    ]
+    for i, a in enumerate(answers):
+        b_note = res["breakdown"][i] if i < len(res["breakdown"]) else ""
+        lines.append(f"--- QUESTION {i+1} ({int(a['seconds'])}s | {len(a['text'].split())} words) ---")
+        lines.append(f"PROMPT : {questions[i][0]}")
+        lines.append(f"ANSWER : {a['text']}")
+        if b_note:
+            lines.append(f"GRADE  : {b_note}")
+        lines.append("")
+    return "\n".join(lines).encode("utf-8")
+
+
+def local_grade_monitor(phase_key: str, events: list[dict]) -> dict:
+    """Grades real monitored ticket replies, public chat responses, and mod actions."""
+    title, pass_pct, scope, _, _ = MONITOR_PHASES[phase_key]
+    if not events:
+        return {
+            "score_pct": 0.0,
+            "verdict": "FAIL",
+            "summary": "Zero monitored ticket or moderation actions were recorded during oversight.",
+            "red_flags": ["No activity recorded during active phase"],
+            "breakdown": ["No recorded interactions"],
+            "grader": "Local Live-Oversight Rubric",
+        }
+
+    total_pts = 0.0
+    breakdown, red_flags = [], []
+
+    for idx, ev in enumerate(events, 1):
+        kind = ev["kind"]
+        if kind == "mod_action":
+            pts = 9.0
+            total_pts += pts
+            breakdown.append(f"#{idx} [Mod Action] {ev['action']} on {ev['target']} — {pts}/10")
+            continue
+
+        txt, low, words, delay, ch_name = ev["text"], ev["text"].lower(), len(ev["text"].split()), ev.get("delay_sec"), ev["channel"]
+        pts = 5.5
+        vocab = GOOD_TICKET_W if kind == "ticket_reply" else GOOD_MOD_W
+        pts += min(2.5, sum(1 for w in vocab if w in low) * 0.9)
+        if words >= 8:
+            pts += 1.2
+        elif words <= 3:
+            pts -= 2.0
+            red_flags.append(f"#{idx} (#{ch_name}): Very short/low-effort reply ('{txt[:40]}')")
+
+        if delay is not None:
+            if delay <= 90:
+                pts += 0.8
+            elif delay > 600:
+                pts -= 0.8
+                red_flags.append(f"#{idx} (#{ch_name}): Slow response time ({int(delay // 60)}m)")
+
+        if any(rw in low for rw in RUDE_W):
+            pts = max(0.0, pts - 5.0)
+            red_flags.append(f"#{idx} (#{ch_name}): Unprofessional/hostile phrasing detected")
+
+        pts = round(max(0.0, min(10.0, pts)), 1)
+        total_pts += pts
+        spd = f", {int(delay)}s reply" if delay is not None else ""
+        breakdown.append(f"#{idx} [#{ch_name}] {pts}/10 ({words}w{spd})")
+
+    pct = round((total_pts / (len(events) * 10.0)) * 100, 1)
+    verdict = "PASS" if pct >= pass_pct and not any("Unprofessional" in r for r in red_flags) else ("BORDERLINE / INTERVIEW" if pct >= pass_pct - 10 else "FAIL")
+    summary = f"Monitored {len(events)} real {scope} action(s) with an overall score of {pct}% (Pass: {pass_pct}%). {'Professional, timely, and thorough handling.' if verdict == 'PASS' else 'Needs improvement in depth, speed, or professionalism.'}"
+    return {"score_pct": pct, "verdict": verdict, "summary": summary, "red_flags": red_flags[:8], "breakdown": breakdown[:15], "grader": "Local Live-Oversight Rubric"}
+
+
+async def grade_monitor(phase_key: str, member, events: list[dict]) -> dict:
+    """Uses Gemini AI (if enabled) or Local Live-Oversight Rubric to grade real mod actions."""
+    local_res = local_grade_monitor(phase_key, events)
+    if not GEMINI_KEY or not events:
+        return local_res
+
+    title, pass_pct, scope, _, _ = MONITOR_PHASES[phase_key]
+    log_txt = "\n\n".join(
+        (
+            f"EVENT #{i+1} [{ev['kind'].upper()} in #{ev['channel']}] "
+            f"(Response Delay: {int(ev['delay_sec']) if ev.get('delay_sec') is not None else 'N/A'}s)\n"
+            f"PLAYER/CONTEXT ABOVE: {ev.get('context', 'N/A')}\n"
+            f"MOD RESPONSE: {ev.get('text', ev.get('action', ''))}"
+        )
+        if ev["kind"] != "mod_action"
+        else f"EVENT #{i+1} [MOD AUDIT ACTION]: {ev['action']} on {ev['target']} (Reason: {ev.get('reason', 'None')})"
+        for i, ev in enumerate(events)
+    )
+    sys_p = (
+        "You are the strict Moderation Oversight Evaluator for Chicago Crossfire (Roblox RP). "
+        f"Evaluating '{title}' (Scope: {scope}, Pass Threshold: {pass_pct}%). "
+        "Grade how the Trial Mod ACTUALLY responded to players in tickets/chats: check tone, speed, "
+        "asking for Roblox username/proof/clips, citing rules accurately, avoiding bias/hostility, and avoiding lazy 2-word answers. "
+        "Return ONLY valid JSON: {\"score_pct\": number (0-100), \"verdict\": \"PASS\"|\"BORDERLINE / INTERVIEW\"|\"FAIL\", "
+        "\"summary\": \"2-3 direct sentences for Developers\", \"red_flags\": [\"short issue\"], "
+        "\"breakdown\": [\"#1 (#channel): X/10 - brief note\"]}"
+    )
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_KEY}"
+    body = {
+        "contents": [{"parts": [{"text": f"MOD CANDIDATE: {member} ({member.id})\n\nLIVE MONITORED LOGS:\n{log_txt[:6000]}"}]}],
+        "systemInstruction": {"parts": [{"text": sys_p}]},
+        "generationConfig": {"temperature": 0.15, "responseMimeType": "application/json"},
+    }
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.post(url, json=body, timeout=25) as r:
+                if r.status == 200:
+                    d = json.loads((await r.json())["candidates"][0]["content"]["parts"][0]["text"].strip())
+                    return {
+                        "score_pct": float(d.get("score_pct", local_res["score_pct"])),
+                        "verdict": str(d.get("verdict", local_res["verdict"])).upper(),
+                        "summary": str(d.get("summary", local_res["summary"]))[:800],
+                        "red_flags": [str(x)[:160] for x in d.get("red_flags", local_res["red_flags"])][:8],
+                        "breakdown": [str(x)[:140] for x in d.get("breakdown", local_res["breakdown"])][:15],
+                        "grader": "Gemini AI Live Oversight Grader",
+                    }
+    except Exception:
+        pass
+    return local_res
+
+
+def build_monitor_transcript(phase_key: str, member, events: list[dict], res: dict, total_sec: float) -> bytes:
+    """Generates a full .txt dossier of every real ticket reply, chat message, and mod action observed."""
+    title, pass_pct, scope, _, _ = MONITOR_PHASES[phase_key]
+    now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    lines = [
+        "================================================================",
+        "   CHICAGO CROSSFIRE — LIVE PHASE OVERSIGHT & GRADING DOSSIER   ",
+        "================================================================",
+        f"Phase       : {title} ({scope})",
+        f"Candidate   : {member} (ID: {member.id})",
+        f"Completed   : {now} | Oversight Duration: {int(total_sec // 60)}m {int(total_sec % 60)}s",
+        f"Grader      : {res['grader']}",
+        f"Final Score : {res['score_pct']}% (Pass Requirement: {pass_pct}%)",
+        f"Verdict     : {res['verdict']}",
+        f"Summary     : {res['summary']}",
+        "Red Flags   : " + ("; ".join(res["red_flags"]) if res["red_flags"] else "None"),
+        "================================================================\n",
+    ]
+    for i, ev in enumerate(events, 1):
+        ts = datetime.datetime.fromtimestamp(ev["ts"], datetime.timezone.utc).strftime("%H:%M:%S UTC")
+        if ev["kind"] == "mod_action":
+            lines.append(f"[{ts}] EVENT #{i} — AUDIT MOD ACTION: {ev['action']} on {ev['target']}")
+            lines.append(f"  Reason: {ev.get('reason', 'None')}\n")
+        else:
+            delay_s = f" | Reply Delay: {int(ev['delay_sec'])}s" if ev.get("delay_sec") is not None else ""
+            lines.append(f"[{ts}] EVENT #{i} — {ev['kind'].upper()} in #{ev['channel']}{delay_s}")
+            if ev.get("context"):
+                lines.append(f"  Player/Context : {ev['context']}")
+            lines.append(f"  Mod Response   : {ev['text']}")
+            if i - 1 < len(res["breakdown"]):
+                lines.append(f"  Grade Note     : {res['breakdown'][i - 1]}")
+            lines.append("")
+    return "\n".join(lines).encode("utf-8")
+
+
+# --- 4. EXAM & LIVE OVERSIGHT LIFECYCLE ---
+async def post_next_question(ch: discord.abc.Messageable, sess: dict) -> None:
+    """Posts the next exam question with minimum word rules."""
+    title, _, min_w, questions = EXAMS[sess["exam_key"]]
+    idx = sess["q_idx"]
+    sess["q_start"] = time.time()
+    emb = discord.Embed(
+        title=f"📝 Question {idx + 1} of {len(questions)} — {title}",
+        description=f"**{questions[idx][0]}**",
+        color=discord.Color.from_rgb(220, 53, 69) if sess["exam_key"] == "chief11" else discord.Color.blurple(),
+    )
+    emb.set_footer(text=f"Minimum {min_w} words required • Type your answer in chat below (or type 'cancel' to forfeit)")
+    await ch.send(content=f"<@{sess['user_id']}>", embed=emb)
+
+
+def parse_phase_request(msg: discord.Message, bot_id: int):
+    """Parses chat requests formatted as: Name: @user / Phase: 1-5 (or Staff/Admin/Chief) / @Bot."""
+    raw = re.sub(rf"<@!?{bot_id}>", "", msg.content or "").strip()
+    phase_m = re.search(r"phase\s*[:\-]\s*([^\n]+)", raw, re.IGNORECASE)
+    if not phase_m:
+        return None, None
+
+    val = phase_m.group(1).strip().lower()
+    exam_key = None
+    if "chief" in val or re.search(r"\b11\b", val):
+        exam_key = "chief11"
+    elif "full admin" in val or re.search(r"\b13\b", val):
+        exam_key = "admin13"
+    elif "admin" in val or re.search(r"\b10\b", val):
+        exam_key = "admin10"
+    elif "staff" in val:
+        exam_key = "staff3"
+    else:
+        num_m = re.search(r"\b([1-5])\b", val)
+        if num_m:
+            exam_key = f"phase{num_m.group(1)}"
+
+    other_mentions = [m for m in msg.mentions if m.id != bot_id]
+    return (other_mentions[0] if other_mentions else msg.author), exam_key
+
+
+async def send_candidate_dm_intro(u: discord.Member, emb: discord.Embed, extra_line: str = "") -> None:
+    """Sends a private DM copy of the official Starting Message & Phase Introduction."""
+    try:
+        await u.send(content=f"🔥 **Your Chicago Crossfire Phase Has Officially Started!** {extra_line}".strip(), embed=emb)
+    except Exception:
+        pass
+
+
+async def launch_exam_room(g: discord.Guild, u: discord.Member, exam_key: str, requested_by: discord.Member = None):
+    """Creates a private overseen exam room, posts the Starting Message & Intro, and DMs the candidate."""
+    for ch_id, s in ACTIVE_EXAMS.items():
+        if s["guild_id"] == g.id and s["user_id"] == u.id:
+            return None, None, f"⚠️ {u.mention} already has an active exam running in <#{ch_id}>!"
+
+    c = gcfg(g.id)
+    dev_role = g.get_role(c.get("dev_role", 0))
+    cat = g.get_channel(c.get("exam_cat", 0))
+    if not isinstance(cat, discord.CategoryChannel):
+        cat = None
+
+    title = EXAMS[exam_key][0]
+    safe = re.sub(r"[^a-z0-9-]", "", u.name.lower())[:14] or "user"
+    ow = {
+        g.default_role: discord.PermissionOverwrite(view_channel=False),
+        u: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
+        g.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_channels=True, read_message_history=True, attach_files=True),
+    }
+    if dev_role:
+        ow[dev_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
+
+    try:
+        exam_ch = await g.create_text_channel(name=f"exam-{exam_key}-{safe}"[:80], category=cat, overwrites=ow, topic=f"CCExam | Key:{exam_key} | UserID:{u.id}")
+    except discord.Forbidden:
+        return None, None, "❌ Bot needs **Manage Channels** permission to open the exam room!"
+
+    sess = {"guild_id": g.id, "user_id": u.id, "exam_key": exam_key, "q_idx": 0, "answers": [], "started_at": time.time(), "q_start": time.time(), "warnings": 0}
+    ACTIVE_EXAMS[exam_ch.id] = sess
+
+    intro_emb = build_starting_intro_embed(g, u, exam_key, requested_by=requested_by, exam_ch=exam_ch, is_monitor=False)
+    await exam_ch.send(
+        content=f"📣 {u.mention} {dev_role.mention if dev_role else ''} — **Read your official Phase Starting Introduction below!**".strip(),
+        embed=intro_emb,
+        view=LiveExamControls(),
+    )
+    asyncio.create_task(send_candidate_dm_intro(u, intro_emb, f"Head into {exam_ch.mention} to begin!"))
+    await asyncio.sleep(2)
+    await post_next_question(exam_ch, sess)
+
+    rep_ch = g.get_channel(c.get("report_ch", 0))
+    if rep_ch:
+        try:
+            await rep_ch.send(f"👁️ **Live Exam Started:** {u.mention} (`{title}`) — Oversee live in {exam_ch.mention}.")
+        except Exception:
+            pass
+    return exam_ch, intro_emb, f"✅ Phase request accepted for {u.mention} (**{title}**)! Private room opened: {exam_ch.mention}"
+
+
+async def start_phase_monitor(g: discord.Guild, u: discord.Member, phase_key: str, req_ch, requested_by: discord.Member = None):
+    """Starts live operational monitoring (Phases 1-3) and builds the full Starting Message & Intro."""
+    mkey = (g.id, u.id)
+    if mkey in ACTIVE_MONITORS:
+        cur = ACTIVE_MONITORS[mkey]
+        return None, f"⚠️ {u.mention} is already being monitored for **`{MONITOR_PHASES[cur['phase_key']][0]}`** (`{len(cur['events'])}/{cur['target']}` actions logged)."
+
+    title, _, scope, target_n, _ = MONITOR_PHASES[phase_key]
+    ACTIVE_MONITORS[mkey] = {
+        "guild_id": g.id, "user_id": u.id, "phase_key": phase_key, "scope": scope, "target": target_n,
+        "events": [], "started_at": time.time(), "req_ch_id": getattr(req_ch, "id", 0), "requested_by": requested_by.id if requested_by else u.id,
+    }
+    intro_emb = build_starting_intro_embed(g, u, phase_key, requested_by=requested_by, is_monitor=True)
+    asyncio.create_task(send_candidate_dm_intro(u, intro_emb, "Live Oversight is now active on your account!"))
+
+    rep_ch = g.get_channel(gcfg(g.id).get("report_ch", 0))
+    if rep_ch:
+        try:
+            await rep_ch.send(f"👁️ **Live Oversight Started:** Monitoring {u.mention} for **`{title}`** (`{scope}`).")
+        except Exception:
+            pass
+    return intro_emb, f"✅ Starting message sent & Live Oversight active for {u.mention} (`{title}`)!"
+
 
 
