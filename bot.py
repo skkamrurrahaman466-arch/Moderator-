@@ -1137,6 +1137,218 @@ class ExamOverseerBot(commands.Bot):
                     sess = ACTIVE_MONITORS.get((g.id, entry.user.id))
                     if sess and sess["scope"] in ("public", "both"):
                         sess["events"].append({"kind": "mod_action", "channel": "audit-log", "action": label, "target": target_str, "reason": entry.reason or "None", "ts": time.time()})
+                        if len(sess["events"]) >= sess["target"]:
+                            asyncio.create_task(finish_monitor_and_report(self, g, entry.user.id))
+                    break
+        except Exception:
+            pass
+
+    async def on_member_update(self, before: discord.Member, after: discord.Member):
+        if before.timed_out_until != after.timed_out_until and after.timed_out_until is not None:
+            await self._log_audit_mod_action(after.guild, discord.AuditLogAction.member_update, "Timeout Applied", str(after))
+
+    async def on_message_delete(self, msg: discord.Message):
+        if msg.guild and not msg.author.bot:
+            await self._log_audit_mod_action(msg.guild, discord.AuditLogAction.message_delete, f"Message Deleted in #{msg.channel.name}", str(msg.author))
+
+    async def on_message(self, msg: discord.Message):
+        if msg.author.bot or not msg.guild:
+            return
+        await self.process_commands(msg)
+
+        # 1. Written Exam Room Handler (Phases 4-5 & Staff/Admin/Chief Admin)
+        sess = ACTIVE_EXAMS.get(msg.channel.id)
+        if sess:
+            if msg.author.id != sess["user_id"]:
+                return
+            txt = (msg.content or "").strip()
+            if not txt:
+                return
+            if txt.lower() in ("cancel", "forfeit", "quit"):
+                return await finish_and_report(self, msg.channel, sess, aborted_reason="Candidate typed cancel/forfeit")
+            _, _, min_w, questions = EXAMS[sess["exam_key"]]
+            words = len(txt.split())
+            if words < min_w:
+                sess["warnings"] += 1
+                if sess["warnings"] >= 3:
+                    return await finish_and_report(self, msg.channel, sess, aborted_reason="3x Low-Effort / Minimum-Word Violations")
+                return await msg.reply(f"⚠️ **Answer Rejected ({words}/{min_w} words)!** Write a full detailed response *(Warning `{sess['warnings']}/3` — 3 = Auto-Fail)*.")
+            sess["answers"].append({"text": txt[:1800], "seconds": time.time() - sess["q_start"]})
+            sess["q_idx"] += 1
+            try:
+                await msg.add_reaction("✅")
+            except Exception:
+                pass
+            if sess["q_idx"] < len(questions):
+                await post_next_question(msg.channel, sess)
+            else:
+                await finish_and_report(self, msg.channel, sess)
+            return
+
+        # 2. Live Operational Monitor Handler (Phases 1-3: Tickets & Public Chat)
+        mon = ACTIVE_MONITORS.get((msg.guild.id, msg.author.id))
+        if mon and self.user not in msg.mentions and (time.time() - mon["started_at"]) >= 4:
+            is_tkt, scope = is_ticket_channel(msg.channel), mon["scope"]
+            ok = (scope == "tickets" and is_tkt) or (scope == "public" and not is_tkt and msg.channel.id != mon["req_ch_id"]) or (scope == "both" and msg.channel.id != mon["req_ch_id"])
+            txt = (msg.content or "").strip()
+            if ok and txt:
+                context_str, delay_sec = "", None
+                try:
+                    async for prev in msg.channel.history(limit=6, before=msg):
+                        if prev.author.id != msg.author.id and (prev.content or prev.embeds):
+                            p_txt = prev.content[:180] if prev.content else f"[Embed: {prev.embeds[0].title or 'Panel'}]"
+                            context_str = f"{prev.author.display_name}: {p_txt}"
+                            delay_sec = max(0.0, (msg.created_at - prev.created_at).total_seconds())
+                            break
+                except Exception:
+                    pass
+                mon["events"].append({"kind": "ticket_reply" if is_tkt else "chat_reply", "channel": msg.channel.name, "text": txt[:900], "context": context_str, "delay_sec": delay_sec, "ts": time.time()})
+                if len(mon["events"]) >= mon["target"]:
+                    asyncio.create_task(finish_monitor_and_report(self, msg.guild, msg.author.id))
+
+        # 3. Chat Phase Request Listener (Name: @user / Phase: 1-5 / @Bot)
+        if self.user in msg.mentions:
+            candidate, exam_key = parse_phase_request(msg, self.user.id)
+            if not exam_key:
+                return await msg.reply(f"📋 **Phase Request Format Required:**\n```\nName: @user\nPhase: 1 / 2 / 3 / 4 / 5 (or Staff / Admin / Chief Admin)\n@{self.user.display_name}\n```")
+            if exam_key in MONITOR_PHASES:
+                intro_emb, note = await start_phase_monitor(msg.guild, candidate, exam_key, msg.channel, requested_by=msg.author)
+                if not intro_emb:
+                    return await msg.reply(note)
+                try:
+                    await msg.add_reaction("👁️")
+                except Exception:
+                    pass
+                return await msg.reply(content=f"📣 {candidate.mention} — **Welcome! Read your official Phase Starting Introduction below:**", embed=intro_emb, view=MonitorControlView())
+            exam_ch, intro_emb, note = await launch_exam_room(msg.guild, candidate, exam_key, requested_by=msg.author)
+            if not exam_ch or not intro_emb:
+                return await msg.reply(note)
+            try:
+                await msg.add_reaction("🔥")
+            except Exception:
+                pass
+            await msg.reply(content=f"📣 {candidate.mention} — **Phase Request Accepted! Read your Starting Introduction below & head into {exam_ch.mention}:**", embed=intro_emb)
+
+
+PHASE_CHOICES = [
+    app_commands.Choice(name="Phase 1 — Live Ticket Response Oversight", value="phase1"),
+    app_commands.Choice(name="Phase 2 — Live Chat & Mod Oversight", value="phase2"),
+    app_commands.Choice(name="Phase 3 — Hybrid Ticket + Mod Oversight", value="phase3"),
+    app_commands.Choice(name="Phase 4 — Live Ambush Stress Test (5Q)", value="phase4"),
+    app_commands.Choice(name="Phase 5 — Chief Admin Final Board (4Q)", value="phase5"),
+    app_commands.Choice(name="Staff Gauntlet (3 Hard Questions)", value="staff3"),
+    app_commands.Choice(name="Admin Vetting Exam (10 Questions)", value="admin10"),
+    app_commands.Choice(name="Chief Administrative — HELL MODE (11Q)", value="chief11"),
+    app_commands.Choice(name="Full Administrator Exam (13 Questions)", value="admin13"),
+]
+
+
+def reg_cmds(bot: ExamOverseerBot):
+    @bot.tree.command(name="exam_setup", description="Set Developer Role, Dev Report Channel, Exam Category & optional Approved Role")
+    async def s_setup(i: discord.Interaction, developer_role: discord.Role, dev_report_channel: discord.TextChannel, exam_category: discord.CategoryChannel, approved_role: discord.Role = None):
+        if not i.user.guild_permissions.administrator:
+            return await i.response.send_message("❌ Administrators only.", ephemeral=True)
+        gcfg(i.guild.id).update({"dev_role": developer_role.id, "report_ch": dev_report_channel.id, "exam_cat": exam_category.id, "approved_role": approved_role.id if approved_role else 0})
+        save_db()
+        await i.response.send_message(f"✅ **Chicago Crossfire Overseer Ready!**\n🛠️ Devs: {developer_role.mention} | 📊 Reports: {dev_report_channel.mention} | 📁 Rooms: `{exam_category.name}`\n👉 Run **`/exam_panel`** in `#phase-requests`!", ephemeral=True)
+
+    @bot.tree.command(name="exam_panel", description="Post the Chicago Crossfire Phase Request & Hardcore Exam Center")
+    async def s_panel(i: discord.Interaction):
+        if not is_dev_or_admin(i.user):
+            return await i.response.send_message("❌ Developers / Admins only.", ephemeral=True)
+        emb = discord.Embed(
+            title="🔥 CHICAGO CROSSFIRE — PHASE OVERSEER & EXAM CENTER",
+            description=(
+                "Request your **Mod Trial Phase (1–5)** or **Staff / Admin / Chief Admin Exam** using the format below or the dropdown:\n\n"
+                f"```\nName: @user\nPhase: 1 / 2 / 3 / 4 / 5 (or Staff / Admin / Chief Admin)\n@{bot.user.display_name}\n```\n"
+                "🎫 **Phases 1–3:** Live Ticket & Chat Oversight • ⚡ **Phases 4–5 & Admin Tracks:** Private Stress Tests & Final Boards\n"
+                "📣 *Sends your official Starting Intro (with profile avatar), grades automatically & reports straight to **Developers**!*"
+            ),
+            color=discord.Color.from_rgb(220, 53, 69),
+        )
+        await i.response.send_message(embed=emb, view=ExamRequestPanel())
+
+    @bot.tree.command(name="request_phase", description="Directly request a Live Oversight Phase (1-3) or Exam (4-5 / Staff / Admin)")
+    @app_commands.choices(exam=PHASE_CHOICES)
+    async def s_req(i: discord.Interaction, exam: app_commands.Choice[str]):
+        await i.response.defer(ephemeral=True)
+        await start_exam_session(i, exam.value)
+
+    @bot.tree.command(name="phase_intro", description="Post the official Starting Message & Phase Introduction for any phase/candidate")
+    @app_commands.choices(phase=PHASE_CHOICES)
+    async def s_intro(i: discord.Interaction, phase: app_commands.Choice[str], member: discord.Member = None):
+        if not is_dev_or_admin(i.user):
+            return await i.response.send_message("❌ Developers / Admins only.", ephemeral=True)
+        emb = build_starting_intro_embed(i.guild, member, phase.value, requested_by=i.user, is_monitor=(phase.value in MONITOR_PHASES))
+        await i.response.send_message(content=f"📣 {member.mention} — **Official Phase Starting Introduction:**" if member else "📣 **Official Phase Introduction:**", embed=emb)
+
+    @bot.tree.command(name="finish_phase", description="Developers: Immediately grade & close a member's active Phase 1-3 live monitor")
+    async def s_fin(i: discord.Interaction, member: discord.Member):
+        if not is_dev_or_admin(i.user):
+            return await i.response.send_message("❌ Developers / Admins only.", ephemeral=True)
+        if (i.guild.id, member.id) not in ACTIVE_MONITORS:
+            return await i.response.send_message(f"⚠️ {member.mention} has no active Phase 1–3 live monitor.", ephemeral=True)
+        await i.response.send_message(f"📊 Grading {member.mention} and transmitting dossier to Developers...", ephemeral=True)
+        asyncio.create_task(finish_monitor_and_report(bot, i.guild, member.id, notify_ch=i.channel))
+
+    @bot.tree.command(name="candidate_status", description="Check a candidate's passed phases and graded exam history")
+    async def s_stat(i: discord.Interaction, member: discord.Member):
+        if not is_dev_or_admin(i.user):
+            return await i.response.send_message("❌ Developers / Admins only.", ephemeral=True)
+        cand = gcfg(i.guild.id)["candidates"].get(str(member.id))
+        if not cand:
+            return await i.response.send_message(f"📋 No exam history found for {member.mention}.", ephemeral=True)
+        passed = ", ".join(f"`{x}`" for x in cand["passed"]) or "*None approved yet*"
+        hist = "\n".join(f"• **`{h['exam']}`** — `{h['score']}%` ({h['verdict']}) <t:{h['ts']}:R>" for h in cand["history"][-8:]) or "*None*"
+        emb = discord.Embed(title=f"📁 Exam Record — {member.display_name}", color=discord.Color.blurple())
+        emb.set_thumbnail(url=member.display_avatar.url)
+        emb.add_field(name="✅ Developer-Approved Tracks", value=passed, inline=False)
+        emb.add_field(name="📊 Recent Attempts", value=hist, inline=False)
+        await i.response.send_message(embed=emb, ephemeral=True)
+
+
+async def main():
+    global BOT_STATUS
+    await run_web()
+    asyncio.create_task(self_ping())
+    if not TOKEN:
+        BOT_STATUS = "MISSING BOT_TOKEN"
+        print("❌ ERROR: Add BOT_TOKEN in Environment Variables!")
+        while True:
+            await asyncio.sleep(3600)
+    mi, mei, w = True, True, 90
+    while True:
+        bot = ExamOverseerBot(mi, mei)
+        reg_cmds(bot)
+        try:
+            await bot.start(TOKEN)
+            break
+        except discord.PrivilegedIntentsRequired:
+            print("⚠️ Enable Message Content & Server Members Intents in Developer Portal!")
+            await bot.close()
+            if mei:
+                mei = False
+            elif mi:
+                mi = False
+            else:
+                await asyncio.sleep(60)
+        except discord.HTTPException as e:
+            await bot.close()
+            if e.status == 429:
+                BOT_STATUS = f"429 wait {w}s"
+                await asyncio.sleep(w)
+                w = min(w + 60, 300)
+            else:
+                await asyncio.sleep(60)
+        except Exception as e:
+            await bot.close()
+            BOT_STATUS = f"Retry ({type(e).__name__})"
+            await asyncio.sleep(60)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+    
                   
 
 
