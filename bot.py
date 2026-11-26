@@ -604,4 +604,75 @@ def reg_cmds(bot: ManagementHubBot):
         if not is_mgmt(i.user):
             return await i.response.send_message("❌ Management only.", ephemeral=True)
         n_on = len(gcfg(i.guild.id)["oncall"])
-        emb = discord.Embed(title="🎧 MANAGEMENT SUPPORT CENTER", description=f"Need Management assistance? Pick a category below to open a private ticket!\n\n🟢 **M
+        emb = discord.Embed(title="🎧 MANAGEMENT SUPPORT CENTER", description=f"Need Management assistance? Pick a category below to open a private ticket!\n\n🟢 **Managers Currently On-Call:** `{n_on}` *(Staff use `/oncall` to toggle)*\n📄 *Full transcripts are automatically sent to your DMs when closed.*", color=discord.Color.blurple())
+        await i.response.send_message(embed=emb, view=SupportPanelView())
+
+    @bot.tree.command(name="oncall", description="Toggle yourself On-Call / Off-Call for Management Support pings")
+    async def s_oc(i: discord.Interaction):
+        if not is_mgmt(i.user):
+            return await i.response.send_message("❌ Management only.", ephemeral=True)
+        oc = gcfg(i.guild.id)["oncall"]
+        if i.user.id in oc:
+            oc.remove(i.user.id)
+            txt = f"🔴 {i.user.mention} is now **OFF-CALL**."
+        else:
+            oc.append(i.user.id)
+            txt = f"🟢 {i.user.mention} is now **ON-CALL** for Management Support tickets!"
+        save_db()
+        await i.response.send_message(txt)
+
+    @bot.tree.command(name="close", description="Close this Management Support ticket and DM the transcript")
+    async def s_cls(i: discord.Interaction, reason: str = "Resolved by Management"):
+        if not is_mgmt(i.user):
+            return await i.response.send_message("❌ Management only.", ephemeral=True)
+        await close_support_ticket(i, reason)
+
+    @bot.tree.command(name="record", description="View a member's passed Phases & Management Trials")
+    async def s_rec(i: discord.Interaction, member: discord.Member):
+        passed = gcfg(i.guild.id)["records"].get(str(member.id), [])
+        emb = discord.Embed(
+            title=f"📁 Clearance Record — {member.display_name}",
+            description=", ".join(f"`{x.upper()}`" for x in passed) or "*No approved phases or trials yet.*",
+            color=discord.Color.blurple(),
+        )
+        emb.set_thumbnail(url=member.display_avatar.url)
+        await i.response.send_message(embed=emb, ephemeral=True)
+
+
+# --- 6. 24/7 ENTRYPOINT WITH 429 AUTO-RETRY ---
+async def main():
+    global STATUS
+    await run_web()
+    asyncio.create_task(self_ping())
+    if not TOKEN:
+        STATUS = "MISSING BOT_TOKEN"
+        print("❌ Add BOT_TOKEN in Environment Variables!")
+        while True:
+            await asyncio.sleep(3600)
+    mi, w = True, 90
+    while True:
+        bot = ManagementHubBot(mi)
+        reg_cmds(bot)
+        try:
+            await bot.start(TOKEN)
+            break
+        except discord.PrivilegedIntentsRequired:
+            await bot.close()
+            mi = False
+        except discord.HTTPException as e:
+            await bot.close()
+            if e.status == 429:
+                STATUS = f"429 wait {w}s"
+                await asyncio.sleep(w)
+                w = min(w + 60, 300)
+            else:
+                await asyncio.sleep(60)
+        except Exception as e:
+            await bot.close()
+            STATUS = f"Retry ({type(e).__name__})"
+            await asyncio.sleep(60)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+    
