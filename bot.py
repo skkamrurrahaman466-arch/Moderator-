@@ -1,315 +1,84 @@
 # =====================================================================
-# PART 1 OF 5 — PASTE THIS FIRST AT LINE 1 OF YOUR GITHUB FILE
-# CHICAGO CROSSFIRE — 24/7 PHASE OVERSEER, AUTO-GRADER & DEV REPORTER
-# Requirements: discord.py, aiohttp | Env Vars: BOT_TOKEN, GEMINI_API_KEY
+# PART 1 OF 2 — PASTE THIS FIRST AT LINE 1 OF YOUR GITHUB FILE
+# CHICAGO CROSSFIRE — COMBINED MANAGEMENT HUB BOT (24/7 SINGLE FILE)
+#   1. Simple Phase Requests (Name: @user / Phase: 1-5 / @Bot)
+#   2. Manager, Senior Manager, Head Manager & Chief Manager Trials
+#   3. Management Support Tickets (Claim, Escalate, DM Transcript & On-Call)
+# Requirements: discord.py, aiohttp | Env Var: BOT_TOKEN
 # =====================================================================
-import asyncio
-import datetime
-import io
-import json
-import os
-import re
-import time
-import aiohttp
+import asyncio, datetime, io, json, os, re, time, aiohttp
 from aiohttp import web
 import discord
-from discord import app_commands
 from discord.ext import commands
 
 TOKEN = os.getenv("BOT_TOKEN", "").strip().strip('"').strip("'")
-GEMINI_KEY = os.getenv("GEMINI_API_KEY", "").strip()
-DB_FILE = "chicago_exams_db.json"
-START_TIME, BOT_STATUS = time.time(), "Starting..."
+DB_FILE = "management_hub_db.json"
+START, STATUS = time.time(), "Starting..."
+ACTIVE_TRIALS: dict[int, dict] = {}
 
-# Active live written exams mapped by exam channel_id: {ch_id: session_dict}
-ACTIVE_EXAMS: dict[int, dict] = {}
-
-# Active live operational monitors mapped by (guild_id, user_id): session_dict
-ACTIVE_MONITORS: dict[tuple[int, int], dict] = {}
-
-# Official Starting Messages & Introductions for EVERY Phase & Executive Track
+# --- 1. PHASE INTROS, MANAGEMENT TRIALS & SUPPORT CATEGORIES ---
 PHASE_INTROS = {
-    "phase1": {
-        "banner": "🎫 PHASE 1 — LIVE TICKET RESPONSE OVERSIGHT",
-        "intro": (
-            "Welcome to **Phase 1 of the Chicago Crossfire Moderator Trial**! "
-            "Your Phase 1 request has been officially logged and **Automated Live Oversight** is now locked onto your profile. "
-            "Do **not** expect a simple quiz—starting right now, the Overseer is silently monitoring how you greet players, "
-            "investigate issues, verify Roblox usernames/proof, and maintain professionalism inside real ticket channels."
-        ),
-        "objective": (
-            "• Claim & respond inside real **Chicago Crossfire ticket channels** (`support-`, `report-`, `appeal-`, `bug-`, `shop-`, `faction-`).\n"
-            "• Greet the player respectfully, request their **Roblox Username** & valid proof/clips, cite exact rules, and resolve cleanly.\n"
-            "• Complete **`4` monitored ticket responses** (or have a Dev click **Grade & Report Now**)."
-        ),
-        "rules": "⛔ **Instant Fail:** Rude/hostile tone, lazy 2-word replies, closing tickets without proof, or defending friends/faction members.",
-        "color": discord.Color.from_rgb(59, 130, 246),
-    },
-    "phase2": {
-        "banner": "👁️ PHASE 2 — LIVE CHAT SURVEILLANCE & MOD OVERSIGHT",
-        "intro": (
-            "Welcome to **Phase 2 of the Chicago Crossfire Moderator Trial**! "
-            "You cleared Phase 1—now you are stepping into **live public chat & active moderation**. "
-            "The Overseer is silently tracking your public chat responses, de-escalation discipline, and live Audit Log moderation actions "
-            "(timeouts & rule-breaking message deletions) to see if you stay ice-cold under baiting and drama."
-        ),
-        "objective": (
-            "• Patrol public chats (`#general`, `#faction-chat`, etc.) and shut down rulebreakers or baiters neutrally in 1–2 calm sentences.\n"
-            "• Cite accurate server rules, direct disputes to tickets (Rule #6), and execute justified moderation actions.\n"
-            "• Complete **`5` monitored public responses / mod actions** for automatic grading."
-        ),
-        "rules": "⛔ **Instant Fail:** Arguing with players in public chat, falling for trolls/bait, mini-modding over Senior Staff, or unlogged punishments.",
-        "color": discord.Color.from_rgb(245, 158, 11),
-    },
-    "phase3": {
-        "banner": "🔎 PHASE 3 — HYBRID TICKET FORENSICS & LIVE MOD OVERSIGHT",
-        "intro": (
-            "Welcome to **Phase 3 of the Chicago Crossfire Moderator Trial**! "
-            "This is the operational crucible—you are now being monitored across **BOTH real ticket forensics AND live server moderation simultaneously**. "
-            "Developers expect you to reject cropped 4-second RDM clips, verify Gamepass claims before escalating, and handle live chat pressure without a single slip-up."
-        ),
-        "objective": (
-            "• Handle high-stakes tickets (`report-`, `appeal-`, `shop-`, `urgent-`) with airtight evidence checks AND moderate public channels.\n"
-            "• Know exactly when to escalate to High Command / Developers vs. resolving independently.\n"
-            "• Complete **`6` monitored ticket & moderation actions** (`88%+` required to pass)."
-        ),
-        "rules": "⛔ **Instant Fail:** Accepting doctored/cropped clips, sloppy transcripts, slow/lazy responses, or showing any faction bias.",
-        "color": discord.Color.from_rgb(234, 88, 12),
-    },
-    "phase4": {
-        "banner": "⚡ PHASE 4 — LIVE AMBUSH & UNDER-FIRE STRESS TEST",
-        "intro": (
-            "Welcome to **Phase 4 of the Chicago Crossfire Moderator Trial**! "
-            "No mercy and no hand-holding. You have entered a locked **Live Ambush & Stress Room** overseen directly by Developers. "
-            "You will face **5 brutal ambush scenarios**—coordinated raids, faction friend traps, faked Inspect Element proof, blackmail appeals, and corrupt orders."
-        ),
-        "objective": (
-            "• Answer all **5 ambush scenarios** inside your private exam channel with concrete, step-by-step protocols.\n"
-            "• Minimum **`25 words`** per response • Passing threshold: **`88%`**.\n"
-            "• Every response speed, word count, and red flag is recorded for Developer review."
-        ),
-        "rules": "⛔ **Instant Fail:** Copy-pasting AI essays, 3 low-effort short-answer warnings, caving to friends/threats, or obeying proof-less orders.",
-        "color": discord.Color.from_rgb(220, 38, 38),
-    },
-    "phase5": {
-        "banner": "🏛️ PHASE 5 — CHIEF ADMINISTRATIVE & DEVELOPER FINAL BOARD",
-        "intro": (
-            "Welcome to **Phase 5 — The Final High Command Board** of **Chicago Crossfire**! "
-            "Very few Trial Moderators survive to this room. Your complete **Phase 1–4 oversight history** has been pulled into your dossier, "
-            "and you will now face **4 final board interrogation checkpoints** graded strictly for Developers & Chief Administration."
-        ),
-        "objective": (
-            "• Deliver an honest self-audit, loophole-free policy rewrite, team-integrity defense, and final Moderator oath.\n"
-            "• Minimum **`25 words`** per checkpoint • Passing threshold: **`90%`**.\n"
-            "• Developers will cast the final verdict (**Approve & Promote** / **Oral Board** / **Fail**)."
-        ),
-        "rules": "⛔ **Instant Fail:** Dodging accountability, generic/AI answers, or failing your prior-phase audit inspection.",
-        "color": discord.Color.from_rgb(124, 58, 237),
-    },
-    "staff3": {
-        "banner": "👥 STAFF ENTRY GAUNTLET — 3 HARDCORE QUESTIONS",
-        "intro": (
-            "Welcome to the **Chicago Crossfire Staff Entry Gauntlet**! "
-            "Only **3 high-pressure questions** stand between you and a Staff seat—which means every single sentence is scrutinized. "
-            "Weak, generic, or one-line replies are rejected automatically by the Overseer."
-        ),
-        "objective": (
-            "• Answer all **3 multi-layered Staff scenarios** covering multi-rule chaos triage, corruption pressure, and concrete contribution.\n"
-            "• Minimum **`30 words`** per answer • Passing threshold: **`85%`**."
-        ),
-        "rules": "⛔ **Instant Fail:** AI-generated text, ignoring parts of a multi-step scenario, or 3 minimum-word rejections.",
-        "color": discord.Color.blurple(),
-    },
-    "admin10": {
-        "banner": "🛡️ ADMINISTRATION VETTING EXAM — 10 HARDCORE QUESTIONS",
-        "intro": (
-            "Welcome to the **Chicago Crossfire Administration Vetting Exam**! "
-            "Issued directly by Leadership to filter out unqualified or biased candidates before granting dangerous Discord permissions. "
-            "You will be tested cold on Role Hierarchy, token-grab containment, Audit Log forensics, raid lockdowns, and conflict-of-interest ethics."
-        ),
-        "objective": (
-            "• Complete all **10 technical & ethical Admin questions** with exact operational steps.\n"
-            "• Minimum **`25 words`** per answer • Passing threshold: **`90%`**."
-        ),
-        "rules": "⛔ **Instant Fail:** AI copy-paste detection, weak security knowledge, or defending faction bias.",
-        "color": discord.Color.from_rgb(185, 28, 28),
-    },
-    "chief11": {
-        "banner": "🔥🏛️ CHIEF ADMINISTRATIVE — HELL MODE EXECUTIVE GAUNTLET (11Q)",
-        "intro": (
-            "Welcome to **HELL MODE — The Chicago Crossfire Chief Administrative Executive Gauntlet**! "
-            "This seat is the **#2 operational authority beneath Ownership**, commanding Administrators, Internal Affairs, Crisis Defense, and Server Security. "
-            "Expect zero forgiveness: you will face simultaneous 3-front catastrophes, internal Admin corruption rings, legal/safety emergencies, "
-            "40% staff mutinies, and executive KPI architecture."
-        ),
-        "objective": (
-            "• Conquer all **11 nightmare-tier executive scenarios** with structured, actionable command plans.\n"
-            "• Minimum **`45 words`** per answer • Passing threshold: **`92%`** + Developer/Ownership Oral Board."
-        ),
-        "rules": "⛔ **Instant Fail:** Leadership buzzwords without concrete execution steps, tipping off corrupt staff before securing proof, caving to blackmail/mutinies, or ANY AI usage.",
-        "color": discord.Color.from_rgb(153, 27, 27),
-    },
-    "admin13": {
-        "banner": "⚔️ FULL ADMINISTRATOR MASTERY EXAM — 13 HARDCORE QUESTIONS",
-        "intro": (
-            "Welcome to the **Chicago Crossfire Full Administrator Mastery Exam**! "
-            "Full Administrators hold destructive permissions—this 13-question gauntlet verifies your live crisis judgment, "
-            "webhook/bot security mastery, anti-framing forensics, Trial Mod coaching, and conflict-free appeal standards."
-        ),
-        "objective": (
-            "• Complete all **13 comprehensive Admin questions** with technical precision.\n"
-            "• Minimum **`25 words`** per answer • Passing threshold: **`88%`**."
-        ),
-        "rules": "⛔ **Instant Fail:** Unlogged moderation mindset, AI-generated answers, or missing critical Discord security fixes.",
-        "color": discord.Color.from_rgb(190, 18, 60),
-    },
+    "phase1": ("🎫 Phase 1 — Ticket Response Oversight", "Respond to real player tickets cleanly. Ask for Roblox username & proof, stay respectful, and avoid lazy short replies.", discord.Color.blue()),
+    "phase2": ("👁️ Phase 2 — Chat Surveillance & Moderation", "Monitor public chat calmly. De-escalate drama in 1–2 neutral sentences, cite exact rules, and log every moderation action.", discord.Color.gold()),
+    "phase3": ("🔎 Phase 3 — Forensics & Hybrid Operations", "Handle high-stakes reports, reject cropped 4s clips, verify Gamepass claims, and moderate public chat simultaneously.", discord.Color.orange()),
+    "phase4": ("⚡ Phase 4 — Under-Fire Stress Ambush", "Prove zero bias and fast judgment under raids, friend-traps, doctored screenshots, and hostile appeals.", discord.Color.red()),
+    "phase5": ("🏛️ Phase 5 — Final High Command Board", "Final review of Phases 1–4. Defend your record and prove you deserve permanent clearance.", discord.Color.purple()),
 }
 
-# Operational Monitoring Phases (Live Oversight for Phases 1-3)
-MONITOR_PHASES = {
-    "phase1": (
-        "Phase 1 — Live Ticket Response Oversight",
-        85,
-        "tickets",
-        4,
-        "Respond to real player tickets! The Overseer is silently monitoring your response speed, greeting, professionalism, proof/Roblox username verification, and rule accuracy.",
-    ),
-    "phase2": (
-        "Phase 2 — Live Chat & Moderation Oversight",
-        85,
-        "public",
-        5,
-        "Monitor public chats & moderate calmly! The Overseer is tracking your rule citations, de-escalation tone, timeouts/deletions, and zero-drama discipline.",
-    ),
-    "phase3": (
-        "Phase 3 — Hybrid Ticket Forensics & Mod Oversight",
-        88,
-        "both",
-        6,
-        "Handle both tickets (evidence/clip checks, escalations) AND live server moderation! Every ticket reply, public guidance, and mod action is logged and graded for Developers.",
-    ),
-}
-
-TICKET_PFX = ("ticket", "support", "report", "appeal", "bug", "shop", "faction", "partner", "urgent")
-GOOD_TICKET_W = ("hello", "welcome", "assist", "help", "roblox", "username", "proof", "clip", "video", "screenshot", "receipt", "rule", "escalat", "thank", "resolve", "anything else", "understand")
-GOOD_MOD_W = ("please", "rule", "ticket", "keep it", "calm", "respect", "stop", "warning", "reminder", "channel", "appeal", "staff")
-RUDE_W = ("shut up", "stfu", "idiot", "stupid", "dumb", "cry about it", "skill issue", "trash", "loser", "clown", "sybau", "idc", "whatever")
-AI_FLAGS = (
-    "as an ai", "in conclusion,", "furthermore, it is crucial",
-    "delve into", "foster a positive", "multifaceted", "holistic approach",
-    "it is imperative that", "paramount importance",
-)
-
-# =====================================================================
-# PART 2 OF 5 — PASTE DIRECTLY BELOW PART 1 (FAR LEFT EDGE)
-# =====================================================================
-EXAMS = {
-    "phase1": (
-        "Mod Trial — Phase 1: Lockdown & Rules Drill", 90, 20, [
-            ("Confirm Discord & Roblox 2FA status and explain why a compromised Trial Mod account threatens the whole server even without Ban permissions.", ["2fa", "token", "delete", "ping", "leak", "permission"]),
-            ("A player posts a spaced invite ('d i s c o r d . g g / ...') and claims it isn't a link. Cite the rule, proof needed BEFORE deleting, and exact punishment.", ["rule", "advert", "screenshot", "proof", "delete", "timeout", "warn"]),
-            ("Define RDM, Combat Logging, Metagaming, and Exploiting in Chicago Crossfire—and state which requires video vs. screenshot proof.", ["rdm", "combat", "meta", "exploit", "video", "clip", "screenshot"]),
-            ("You accidentally timeout the wrong user in a fast argument. Detail your exact correction, apology, and staff-log steps within 60 seconds.", ["unmute", "remove", "apolog", "log", "staff", "mistake"]),
-            ("What data inside #staff-chat, #transcript-logs, and Audit Logs is strictly classified, and what happens if you leak even a cropped screenshot?", ["leak", "confidential", "blacklist", "terminate", "demote", "transcript"]),
+# key: (Title, Pass%, MinWords, Color, Intro, [(Question, [expected_keywords]), ...])
+TRIALS = {
+    "manager": (
+        "Manager Trial", 80, 18, discord.Color.blue(),
+        "Welcome to the **Manager Trial**! Prove you can lead day-to-day staff operations, handle escalations fairly, and keep support active.",
+        [
+            ("Two moderators argue publicly in #general over a punishment while players watch. Give your exact steps to stop the drama and resolve it privately.", ["private", "staff", "calm", "stop", "log", "professional"]),
+            ("A staff member keeps claiming tickets and closing them with 2-word answers to farm stats. How do you verify this and handle it fairly?", ["transcript", "audit", "warn", "coach", "evidence", "quality"]),
+            ("Tickets are piling up during peak hours and half the mods are AFK. What exact steps do you take in the next 10 minutes?", ["oncall", "ping", "claim", "delegate", "active", "priorit"]),
         ],
     ),
-    "phase2": (
-        "Mod Trial — Phase 2: Live Surveillance & Anti-Baiting", 85, 20, [
-            ("Describe 3 real or realistic chat violations you must catch early before Senior Staff intervene, including rule numbers and logging steps.", ["rule", "log", "proof", "staff", "warn"]),
-            ("A troll tries to rule-shark and bait you in #general to make you lose your temper. Write your exact 1-2 sentence neutral shutdown.", ["ticket", "calm", "neutral", "rule", "drama", "de-escalate"]),
-            ("Where is the exact line between normal Chicago RP banter and Rule #1 Harassment when a gang leader mocks a new player without slurs?", ["target", "harass", "repeated", "new", "warn", "respect"]),
-            ("Explain a specific scenario where deleting a rule-breaking message immediately is WORSE than waiting 5 seconds to capture proof first.", ["screenshot", "evidence", "proof", "id", "log", "delete"]),
-            ("How do you spot disguised self-promotion or raid scouts in public chat without falsely punishing innocent players?", ["invite", "dm", "alt", "account", "age", "context", "verify"]),
+    "senior": (
+        "Senior Manager Trial", 85, 22, discord.Color.teal(),
+        "Welcome to the **Senior Manager Trial**! You are tested on overseeing Managers, catching bias, and resolving high-stakes disputes.",
+        [
+            ("A Manager promotes their close friend who failed Phase 3 and skipped logs. Detail your exact investigation, reversal, and disciplinary steps.", ["audit", "log", "bias", "demote", "evidence", "escalate", "chief"]),
+            ("A player opens an URGENT ticket claiming a Staff member threatened them in DMs with screenshots. How do you authenticate proof before acting?", ["id", "inspect", "verify", "context", "suspend", "impersonat", "proof"]),
+            ("Staff activity drops by 50% in one week due to burnout and boring shifts. Outline a concrete 7-day recovery plan you would run.", ["schedule", "loa", "quota", "recruit", "motivat", "shift", "check"]),
+            ("A rival server sends 15 members to mass-report and bait your Managers into breaking rules. How do you brief and protect your team?", ["calm", "bait", "log", "lock", "slowmode", "evidence", "ban"]),
         ],
     ),
-    "phase3": (
-        "Mod Trial — Phase 3: Ticket Triage & Clip Forensics", 85, 22, [
-            ("Explain your complete workflow from claiming a Chicago Crossfire ticket to closing it with an airtight transcript.", ["claim", "proof", "roblox", "reason", "transcript", "close"]),
-            ("A player sends a 4-second cropped clip of dying and yells 'BAN FOR RDM!' Why is it invalid and what exact evidence do you demand?", ["context", "full", "30", "longer", "bait", "username", "proof"]),
-            ("A player opens a Shop/Gamepass ticket claiming a missing weapon pack with a blurry screenshot. What exact verification steps do you take before pinging Devs?", ["roblox", "receipt", "inventory", "gamepass", "username", "verify", "escalate"]),
-            ("List 3 exact situations where you MUST escalate a ticket to High Command / Developers instead of handling it yourself.", ["exploit", "dev", "staff", "dox", "shop", "conflict", "urgent"]),
-            ("A ticket opener gets impatient and starts swearing at you inside the ticket. How do you enforce rules while still resolving their actual report?", ["warn", "professional", "calm", "evidence", "close", "transcript"]),
+    "head": (
+        "Head Manager Trial", 88, 25, discord.Color.orange(),
+        "Welcome to the **Head Manager Trial**! You command Management divisions, enforce zero-corruption standards, and protect server stability.",
+        [
+            ("A Senior Manager's account is compromised and starts editing channels and stripping roles. List your exact first 5 containment actions in order.", ["strip", "ban", "role", "audit", "lock", "pause", "alert"]),
+            ("Developers and Management blame each other for delayed bug fixes and angry players. Design a strict SLA & escalation workflow to end friction.", ["sla", "triage", "dev", "boundary", "ticket", "verify", "accountab"]),
+            ("Design a fair, tamper-proof Promotion & Strike Decay system for Manager -> Senior Manager so favoritism is impossible.", ["metric", "audit", "transcript", "objective", "threshold", "decay", "log"]),
+            ("A top Donor/Booster breaks rules repeatedly and threatens to pull all boosts if punished. State your decision, evidence steps, and public stance.", ["ban", "equal", "bias", "proof", "credib", "rule"]),
         ],
     ),
-    "phase4": (
-        "Mod Trial — Phase 4: Live Ambush & Stress Test", 88, 25, [
-            ("RAID AMBUSH: 8 alts flood #general with mass pings and fake Robux links while no Admins are online. Give your exact 30-second Mod-only action sequence.", ["slowmode", "timeout", "delete", "screenshot", "id", "ping", "admin"]),
-            ("FRIEND TRAP: Your own faction Co-Leader is reported with clear 30s video of speed-hacking and DMs you begging to hide it. Detail your exact actions on BOTH the ticket and DM.", ["conflict", "recuse", "escalate", "screenshot", "dm", "bias", "ban"]),
-            ("DOCTORED PROOF: Someone submits a screenshot of a rival gang leader using a slur, but you suspect Inspect Element/Photoshop. How do you verify it?", ["search", "log", "message", "id", "deleted", "audit", "verify"]),
-            ("HOSTILE APPEAL: A banned player insults you and threatens a TikTok 'exposed' video unless unbanned in 5 mins. Write your word-for-word reply and closing action.", ["appeal", "evidence", "blackmail", "professional", "deny", "close", "transcript"]),
-            ("CORRUPT ORDER: A Senior Mod orders you to ban someone immediately with zero proof ('I hate that kid'). Do you obey or refuse? Explain how you escalate.", ["refuse", "proof", "escalate", "admin", "chief", "screenshot", "log"]),
-        ],
-    ),
-    "phase5": (
-        "Mod Trial — Phase 5: Chief Admin Final Board", 90, 25, [
-            ("SELF-AUDIT: Identify your biggest weakness or hardest judgment call during Mod duties, why it happens, and the concrete safeguard you use to fix it.", ["mistake", "verify", "double", "second", "log", "calm"]),
-            ("POLICY REWRITE: Pick one Chicago Crossfire rule players abuse via loopholes and draft a stricter, loophole-free replacement.", ["loophole", "rule", "clip", "proof", "punish", "context"]),
-            ("TEAM INTEGRITY: Explain how you handle disagreeing with a Fellow Mod's punishment in public chat vs. private staff channels.", ["private", "staff", "public", "rule", "admin", "professional"]),
-            ("FINAL OATH: Why should Developers & Chief Administration trust you with permanent Moderator permissions over every other Trial Mod?", ["bias", "proof", "active", "audit", "trust", "accountab"]),
-        ],
-    ),
-    "staff3": (
-        "Staff Gauntlet (3 Hardcore Questions)", 85, 30, [
-            ("MULTI-RULE TRIAGE: Simultaneously in #general: (A) rival factions trade personal insults, (B) a member advertises their Roblox game, and (C) a new player is mocked. Give exact priority order, rules, wording, and logging steps.", ["priority", "advert", "delete", "harass", "rule", "log", "timeout"]),
-            ("CORRUPTION PRESSURE: You catch a higher-ranking Staff member deleting their friend's violation and they threaten to get you demoted. Detail your evidence preservation and chain-of-command steps.", ["screenshot", "log", "id", "chief", "owner", "escalate", "silent"]),
-            ("CONCRETE VALUE: Give your real weekly schedule, one real personal weakness (and how you control it), and two specific improvements you will execute in 14 days.", ["schedule", "hour", "weakness", "improve", "ticket", "active"]),
-        ],
-    ),
-    "admin10": (
-        "Admin Vetting Exam (10 Hardcore Questions)", 90, 25, [
-            ("Explain Discord's Role Hierarchy and the exact disaster if a Trial Mod or public Bot role sits above Admin or Auto-Mod.", ["hierarchy", "above", "cannot", "kick", "ban", "nuke", "top"]),
-            ("A Mod's account is token-grabbed and starts spamming @everyone Nitro scams and deleting #announcements. List your exact first 5 containment actions in order.", ["strip", "role", "ban", "kick", "delete", "audit", "alert"]),
-            ("A rival faction opens an URGENT exploit report against your own gang leader. What is the ONLY acceptable protocol and why?", ["recuse", "conflict", "bias", "escalate", "credib", "another"]),
-            ("A player sends a DDoS threat screenshot + 5s cropped Roblox clip with no username. How do you check for Inspect Element and why does the clip fail?", ["inspect", "log", "id", "context", "username", "invalid", "proof"]),
-            ("Someone secretly gave a user Manage Channels, wiped #general, and removed the role 20s later. Detail your exact Audit Log investigation.", ["audit", "filter", "role", "channel", "timestamp", "target", "id"]),
-            ("You find a respected Mod banned an innocent player out of anger with zero proof. How do you unban, document, and coach privately without public drama?", ["unban", "private", "log", "apolog", "strike", "public"]),
-            ("25 raid bots flood 4 channels with NSFW & pings. Walk through your exact Discord lockdown, purge, mass-ban, and safe reopening sequence.", ["pause", "invite", "verification", "lock", "slowmode", "ban", "purge"]),
-            ("Name 4 Discord permissions Mods/junior Bots must NEVER hold and explain the exact nuke/abuse scenario each enables.", ["administrator", "webhook", "manage", "role", "channel", "ban", "nuke"]),
-            ("A fellow Admin is consistently rude in tickets and punishes players out of anger. How do you build a factual case and escalate to Chief Admin?", ["transcript", "pattern", "evidence", "objective", "chief", "escalate"]),
-            ("If promoted to Admin today, what is the #1 mistake you are most likely to make in Month 1 and what hard safeguard stops it?", ["mistake", "check", "second", "log", "safeguard", "bias"]),
-        ],
-    ),
-    "chief11": (
-        "Chief Administrative — HELL MODE (11 Executive Questions)", 92, 45, [
-            ("3-FRONT CATASTROPHE (Owner offline 6h): Simultaneously (A) compromised Senior Admin deletes channels/bans members, (B) 40-bot NSFW raid hits public chat, (C) in-game dupe glitch leaks causing #general riots. Give your minute-by-minute Command Protocol (0-2m, 2-10m, 10-60m).", ["strip", "ban", "pause", "invite", "lock", "dev", "audit", "statement", "delegate"]),
-            ("CORRUPTION RING: Whistleblower evidence shows your Head Admin + 3 Mods collude with a gang (tipping off spectates, deleting friend tickets, blacklisting rivals). Detail covert IA investigation, synchronized simultaneous strip, and wrongful-ban recovery.", ["covert", "audit", "transcript", "simultaneous", "strip", "retaliat", "review", "unban"]),
-            ("LEGAL/SAFETY EMERGENCY: A Senior Mod is accused of pressuring a 13yo in DMs for personal photos while someone else doxxes a staff member's address in #general. Detail exact preservation (IDs/links), immediate removal, Discord/Roblox Trust & Safety escalation, and confidentiality.", ["delete", "dox", "message id", "user id", "trust", "safety", "suspend", "ban", "confidential"]),
-            ("40% STAFF MUTINY: After rightfully blacklisting a popular abusive Admin, 2 Admins & 5 Mods threaten mass resignation unless you reinstate them while rival servers spread smears. Explain why you do/don't negotiate, emergency coverage, and PR discipline.", ["refuse", "negotiate", "blackmail", "coverage", "calm", "professional", "drama", "retain"]),
-            ("ANTI-NUKE ARCHITECTURE: Blueprint Chicago Crossfire's full Discord security: Role Hierarchy layering, Webhook/Bot token Least-Privilege rules, 2FA policy, and your Sunday 5-min Security Audit checklist.", ["hierarchy", "webhook", "administrator", "2fa", "audit", "bot", "least"]),
-            ("CREATOR BLACKMAIL: A 25k-follower YouTuber (owns all gamepasses + Server Booster) is caught on clear video using hitbox exploits and threatens an Exposed video if banned. Detail enforcement, evidence lock, Owner brief, and PR stance.", ["ban", "equal", "bias", "video", "proof", "owner", "credibility", "statement"]),
-            ("CORRUPTION-PROOF KPIs: Quotas like '10 tickets/wk' cause ghost-claiming and rushed closes. Design a quality+quantity Staff Evaluation System catching stat-padding, plus fair LOA, strike decay, and promotion/demotion thresholds.", ["transcript", "audit", "quality", "sniping", "loa", "decay", "threshold", "metric"]),
-            ("LOOPHOLE ELIMINATION: Gangs camp safe-zones, bait civilians into 1 shot, then clip only the civilian to fake RDM bans. Draft the exact new rule text, clip requirements, baiting penalty, in-game/Discord sync, and retroactive vs. prospective enforcement.", ["clip", "context", "30", "bait", "false", "prospective", "retroactive", "dev"]),
-            ("ENDING DEPT WAR: Buggy update triggers blame war between Devs, Admin Staff, and PD/Faction Leads. Define exact workflow, SLA response standards, communication boundaries, and joint accountability.", ["sla", "triage", "boundary", "bug", "qa", "escalation", "joint", "accountab"]),
-            ("INCORRUPTIBLE BLACKLIST & APPEALS: Stop bribed/quiet unbans. Design a tamper-proof Blacklist & Tribunal system with mandatory IDs/archives, dual-approval unbans, cooldowns, and weekly Unban Audit checks.", ["roblox", "discord", "id", "dual", "approval", "cooldown", "audit", "unban"]),
-            ("EXECUTIVE MIRROR: Give (A) your concrete Week 1-4 Restructuring Plan, (B) your single most dangerous real leadership flaw + safeguard, and (C) 3 exact failures that justify Ownership stripping you on the spot.", ["week", "audit", "flaw", "safeguard", "leak", "bias", "strip", "owner"]),
+    "chief": (
+        "Chief Manager Trial — HELL MODE", 92, 35, discord.Color.dark_red(),
+        "Welcome to **HELL MODE — The Chief Manager Executive Trial**! You are vetted for the highest Management authority beneath Ownership & Developers. Zero mercy.",
+        [
+            ("3-FRONT CRISIS (Owner offline): Simultaneously a Head Manager leaks staff chats, 30 raid bots spam NSFW in #general, and tickets flood with an exploit. Give your minute-by-minute Command Protocol.", ["strip", "ban", "pause", "invite", "lock", "dev", "audit", "delegate", "statement"]),
+            ("CORRUPTION RING: Proof shows a Head Manager + 2 Senior Managers secretly protect a faction and blacklist rivals. Detail covert IA proof gathering, synchronized simultaneous removal, and wrongful-ban recovery.", ["covert", "proof", "audit", "simultaneous", "strip", "retaliat", "unban", "review"]),
+            ("40% MANAGEMENT MUTINY: After blacklisting a popular Senior Manager, 6 Managers threaten mass resignation unless you reverse it. Explain why you refuse, emergency coverage, and PR discipline.", ["refuse", "blackmail", "coverage", "calm", "professional", "retain", "drama"]),
+            ("ANTI-NUKE & LEAST-PRIVILEGE: Blueprint our Discord Role Hierarchy, Bot/Webhook security rules, mandatory 2FA policy, and weekly Security Audit checklist.", ["hierarchy", "webhook", "administrator", "2fa", "audit", "least", "bot"]),
+            ("EXECUTIVE MIRROR: Give (A) your concrete 30-day restructuring roadmap, (B) your single biggest real flaw + safeguard, and (C) 3 failures that justify instant stripping by Ownership.", ["week", "audit", "flaw", "safeguard", "bias", "leak", "strip", "owner"]),
         ],
     ),
 }
 
-# =====================================================================
-# PART 3 OF 5 — PASTE DIRECTLY BELOW PART 2 (FAR LEFT EDGE)
-# =====================================================================
-EXAMS["admin13"] = (
-    "Full Administrator Exam (13 Hardcore Questions)", 88, 25, [
-        ("List your verified Admin+ track record and detail one real crisis you solved—including what went wrong and what you'd do faster.", ["crisis", "resolve", "faster", "mistake", "experience"]),
-        ("Explain the exact risks of Manage Roles, Manage Webhooks, Manage Server, and Administrator—and how a rogue Manage Webhooks user ruins a server without Send Messages.", ["webhook", "role", "administrator", "spam", "nuke", "impersonat"]),
-        ("Our Auto-Mod bot fails to auto-ban a rogue Senior Mod spamming scam links. Diagnose BOTH technical reasons and the exact fix.", ["hierarchy", "role", "above", "permission", "ban", "top"]),
-        ("A Trial Mod escalates an URGENT ticket mixing a mass-exploiter, missing Gamepass claim, and staff misconduct complaint. How do you separate, investigate, and route all three?", ["separate", "dev", "chief", "proof", "transcript", "verify"]),
-        ("Walk through your exact order of Discord actions during a 30-account raid without mass-banning legitimate players.", ["pause", "invite", "verification", "lock", "id", "age", "ban"]),
-        ("A rival faction submits 3 screenshots accusing a PD Commander of corrupt DMs and powergaming. Give 4 technical checks to detect framing/impersonation.", ["id", "impersonat", "inspect", "context", "log", "video", "verify"]),
-        ("A Phase 3 Trial Mod ignores proof rules and argues in tickets after 1 warning. Give your exact decision (retrain vs. fail) and write the exact DM.", ["proof", "fail", "demote", "professional", "reason", "reapply"]),
-        ("A weapon nerf triggers 15 players spamming 'L DEVS' and mass-pinging Devs in #general. Regain control in 60s without unfairly locking the whole server.", ["slowmode", "redirect", "feedback", "warn", "ping", "calm"]),
-        ("Ownership is offline during 3 failures: (A) Bloxlink fails to sync, (B) Ticket Bot crashes mid-rush, (C) Google Form webhook gets spammed. Detail all 3 fixes.", ["manual", "role", "fallback", "delete", "webhook", "notify", "dev"]),
-        ("A furious user accuses YOU of power-tripping in #general in front of 50 people. Write your exact public reply, private step, and why silently deleting looks guilty.", ["ticket", "calm", "audit", "log", "transparent", "chief", "guilty"]),
-        ("A player you banned 3 weeks ago submits a mature Ban Appeal. Should YOU alone decide it? Explain conflict-of-interest appeals.", ["conflict", "bias", "another", "admin", "second", "unbiased"]),
-        ("Diagnose 2 real operational weaknesses in growing Chicago RP servers and design a concrete Admin-run fix for both.", ["activity", "shift", "ticket", "bias", "system", "track"]),
-        ("State your daily active window (with timezone), accept instant termination for any unlogged abuse/leak/bias, and prove in 3 sharp sentences why Chicago Crossfire is safer with you.", ["timezone", "active", "blacklist", "accountab", "audit", "safe"]),
-    ],
-)
+SUPPORT_CATS = {
+    "general": ("Management Support", "mgmt-help", "💬", discord.Color.blurple(), "Describe your question and an On-Call Manager will assist you."),
+    "report": ("Staff / Manager Report", "mgmt-report", "🚨", discord.Color.red(), "Provide the user's name, incident details, and screenshot/clip proof."),
+    "partner": ("Partnership / Faction Inquiry", "mgmt-partner", "🤝", discord.Color.green(), "Share your server/faction details and inquiry below."),
+    "exec": ("Head / Chief Manager Escalation", "mgmt-exec", "👑", discord.Color.gold(), "High-priority executive matter. Explain clearly why Chief/Head Management is needed."),
+}
 
 
 def load_db() -> dict:
-    """Loads persisted server configuration and candidate grading records."""
+    """Loads persisted server configuration and clearance records from JSON."""
     try:
         return json.load(open(DB_FILE, encoding="utf-8")) if os.path.exists(DB_FILE) else {}
     except Exception:
@@ -317,7 +86,7 @@ def load_db() -> dict:
 
 
 def save_db() -> None:
-    """Persists database safely to disk."""
+    """Saves server configuration and clearance records safely to JSON."""
     try:
         json.dump(DB, open(DB_FILE, "w", encoding="utf-8"), indent=2)
     except Exception:
@@ -328,95 +97,45 @@ DB = load_db()
 
 
 def gcfg(gid: int) -> dict:
-    return DB.setdefault(
-        str(gid),
-        {"dev_role": 0, "report_ch": 0, "exam_cat": 0, "approved_role": 0, "candidates": {}},
-    )
+    return DB.setdefault(str(gid), {"dev_role": 0, "mgmt_role": 0, "chief_role": 0, "log_ch": 0, "cat_id": 0, "oncall": [], "records": {}})
 
 
-def is_dev_or_admin(m: discord.Member) -> bool:
-    """True for Administrators or members with the configured Developer Role."""
+def is_mgmt(m: discord.Member) -> bool:
+    """Checks if a user is Management, Chief, Developer, or Admin."""
+    if not isinstance(m, discord.Member):
+        return False
+    if m.guild_permissions.administrator or m.guild_permissions.manage_channels:
+        return True
+    c = gcfg(m.guild.id)
+    rids = {c["dev_role"], c["mgmt_role"], c["chief_role"]} - {0}
+    return any(r.id in rids for r in m.roles)
+
+
+def is_exec(m: discord.Member) -> bool:
+    """Checks if a user is Chief Management, Developer, or Admin."""
     if not isinstance(m, discord.Member):
         return False
     if m.guild_permissions.administrator:
         return True
-    drid = gcfg(m.guild.id).get("dev_role", 0)
-    return bool(drid and any(r.id == drid for r in m.roles))
+    c = gcfg(m.guild.id)
+    rids = {c["dev_role"], c["chief_role"]} - {0}
+    return any(r.id in rids for r in m.roles)
 
 
-def is_ticket_channel(ch) -> bool:
-    """Detects whether a Discord channel is an active support/report/appeal ticket."""
-    name = (getattr(ch, "name", "") or "").lower()
-    topic = (getattr(ch, "topic", "") or "").lower()
-    return name.startswith(TICKET_PFX) or any(k in topic for k in ("ccticket", "ruleticket", "ticketsys", "ticket |", "appeal"))
-
-
-def build_starting_intro_embed(
-    g: discord.Guild,
-    u: discord.Member | None,
-    phase_key: str,
-    requested_by: discord.Member = None,
-    exam_ch: discord.TextChannel = None,
-    is_monitor: bool = False,
-) -> discord.Embed:
-    """Builds the official Starting Message & Phase Introduction embed with Candidate Avatar."""
-    info = PHASE_INTROS[phase_key]
-    cand_line = f"👤 **Candidate:** {u.mention} (`{u.display_name}` | ID: `{u.id}`)" if u else "👤 **Candidate:** *Open Phase Briefing*"
-    req_line = f"\n📨 **Requested By:** {requested_by.mention}" if (requested_by and u and requested_by.id != u.id) else ""
-    room_line = f"\n🚪 **Assigned Exam Room:** {exam_ch.mention}" if exam_ch else ""
-
-    if is_monitor and phase_key in MONITOR_PHASES:
-        _, pass_pct, scope, target_n, _ = MONITOR_PHASES[phase_key]
-        mode_line = f"📡 **Mode:** Live Operational Monitoring (`{scope.upper()}`) • 🎯 **Goal:** `{target_n}` actions • ✅ **Pass:** `{pass_pct}%`"
-    else:
-        _, pass_pct, min_w, questions = EXAMS[phase_key]
-        mode_line = f"📝 **Mode:** Overseen Exam Room • 📋 **Questions:** `{len(questions)}` • ✍️ **Min:** `{min_w}w` • ✅ **Pass:** `{pass_pct}%`"
-
-    emb = discord.Embed(
-        title=info["banner"],
-        description=f"{cand_line}{req_line}{room_line}\n{mode_line}\n\n{info['intro']}",
-        color=info["color"],
-        timestamp=discord.utils.utcnow(),
-    )
-    emb.add_field(name="🎯 Phase Objectives & Requirements", value=info["objective"], inline=False)
-    emb.add_field(name="⚠️ Strict Rules & Instant-Fail Policy", value=info["rules"], inline=False)
-    emb.add_field(
-        name="📊 Developer Oversight & Grading",
-        value="Every response, timing metric, and action is logged and auto-graded, then transmitted with a full `.txt` dossier straight to **Chicago Crossfire Developers**.",
-        inline=False,
-    )
-
-    if u:
-        avatar_url = u.display_avatar.url
-        emb.set_author(name=f"Chicago Crossfire Oversight — {u.display_name}", icon_url=avatar_url)
-        emb.set_thumbnail(url=avatar_url)
-        footer_prefix = f"MonitorKey:{phase_key} | CandidateID:{u.id}" if is_monitor else f"ExamKey:{phase_key} | CandidateID:{u.id}"
-        emb.set_footer(text=f"{footer_prefix} • Chicago Crossfire Automated Overseer")
-    else:
-        if g and g.icon:
-            emb.set_thumbnail(url=g.icon.url)
-        emb.set_footer(text=f"Track:{phase_key} • Chicago Crossfire Automated Overseer")
-
-    if phase_key == "phase5" and u and g:
-        cand = gcfg(g.id)["candidates"].get(str(u.id), {})
-        past = "\n".join(f"• `{h['exam']}`: **{h['score']}%** (`{h['verdict']}`)" for h in cand.get("history", [])[-6:]) or "*No prior phases recorded yet*"
-        emb.add_field(name="📁 Prior Trial Phase History (Phases 1–4)", value=past, inline=False)
-
-    return emb
-
-
-# --- 2. 24/7 KEEP-ALIVE WEB SERVER & SELF-PINGER ---
+# --- 2. 24/7 RENDER KEEP-ALIVE WEB SERVER ---
 async def run_web():
+    """Starts the aiohttp health server for Render & cron-job.org pings."""
     app = web.Application()
-    fn = lambda r: web.Response(text=f"Chicago Crossfire Exam Overseer 24/7 | Up:{int((time.time()-START_TIME)//60)}m | {BOT_STATUS}")
+    fn = lambda r: web.Response(text=f"Management Hub Bot 24/7 | Up:{int((time.time()-START)//60)}m | {STATUS}")
     app.router.add_get("/", fn)
     app.router.add_get("/health", fn)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    await web.TCPSite(runner, "0.0.0.0", int(os.environ.get("PORT", 10000))).start()
+    r = web.AppRunner(app)
+    await r.setup()
+    await web.TCPSite(r, "0.0.0.0", int(os.environ.get("PORT", 10000))).start()
 
 
 async def self_ping():
+    """Backup keep-alive ping loop."""
     await asyncio.sleep(25)
     url = os.environ.get("RENDER_EXTERNAL_URL") or f"http://127.0.0.1:{os.environ.get('PORT', 10000)}/"
     async with aiohttp.ClientSession() as s:
@@ -429,927 +148,109 @@ async def self_ping():
             await asyncio.sleep(240)
 
 
-# --- 3. WRITTEN EXAM GRADING ENGINE ---
-def local_grade_exam(exam_key: str, answers: list[dict]) -> dict:
-    """Strict built-in rubric grader that scores concept coverage, depth & anti-cheat flags."""
-    title, pass_pct, min_words, questions = EXAMS[exam_key]
-    notes, red_flags = [], []
-    total_pts = 0.0
+# --- 3. TRANSCRIPTS, AUTO-GRADING & TRIAL LAUNCHER ---
+async def build_channel_transcript(ch: discord.TextChannel, closer: discord.Member, reason: str) -> bytes:
+    """Exports all messages & attachments in a support ticket into a .txt file."""
+    now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    lines = [f"=== {ch.guild.name} MANAGEMENT SUPPORT TRANSCRIPT ===", f"Channel: #{ch.name} | Closed By: {closer} | Reason: {reason} | At: {now}\n"]
+    async for m in ch.history(limit=None, oldest_first=True):
+        ts = m.created_at.strftime("%Y-%m-%d %H:%M")
+        lines.append(f"[{ts}] {m.author.display_name}: {m.content}")
+        for a in m.attachments:
+            lines.append(f"  [File] {a.url}")
+    return "\n".join(lines).encode("utf-8")
 
+
+async def close_support_ticket(i: discord.Interaction, reason: str = "Resolved by Management"):
+    """Saves the ticket transcript, DMs the opener, archives to logs, and deletes the channel."""
+    ch, g = i.channel, i.guild
+    topic = ch.topic or ""
+    if not topic.startswith("MgmtTicket |"):
+        return await i.response.send_message("❌ Use this inside a Management Support ticket.", ephemeral=True)
+    await i.response.send_message(f"📄 Saving transcript & DMing opener... Closing in **5s**.\n> **Reason:** {reason}")
+    uid_m = re.search(r"UserID:(\d+)", topic)
+    opener_id = int(uid_m.group(1)) if uid_m else None
+    raw = await build_channel_transcript(ch, i.user, reason)
+    fname = f"transcript-{ch.name}.txt"
+
+    if opener_id:
+        try:
+            usr = g.get_member(opener_id) or await i.client.fetch_user(opener_id)
+            await usr.send(f"📄 **{g.name} — Management Support Transcript (`#{ch.name}`)**\nClosed by **{i.user.display_name}** | Reason: `{reason}`", file=discord.File(io.BytesIO(raw), filename=fname))
+        except Exception:
+            pass
+
+    log_ch = g.get_channel(gcfg(g.id)["log_ch"])
+    if log_ch:
+        try:
+            await log_ch.send(f"📁 **Support Ticket Closed:** `#{ch.name}` | Opener: {f'<@{opener_id}>' if opener_id else 'Unknown'} | Closed By: {i.user.mention} | Reason: `{reason}`", file=discord.File(io.BytesIO(raw), filename=fname))
+        except Exception:
+            pass
+
+    await asyncio.sleep(5)
+    try:
+        await ch.delete(reason=f"Closed by {i.user}: {reason}")
+    except Exception:
+        pass
+
+
+def grade_trial(rank_key: str, answers: list[dict]) -> tuple[float, str, list[str], bytes]:
+    """Strictly grades a Management Trial and exports a .txt dossier."""
+    title, pass_pct, min_w, _, _, qs = TRIALS[rank_key]
+    total, breakdown, lines = 0.0, [], [f"=== {title.upper()} DOSSIER ==="]
     for idx, ans in enumerate(answers):
-        txt, low, words, elapsed = ans["text"], ans["text"].lower(), len(ans["text"].split()), ans["seconds"]
-        concepts = questions[idx][1]
-        hits = sum(1 for c in concepts if c in low)
-        concept_ratio = min(1.0, hits / max(1, min(len(concepts), 4)))
-        depth_ratio = min(1.0, words / max(min_words * 1.4, 30))
-        pts = round((concept_ratio * 6.0) + (depth_ratio * 4.0), 1)
-
-        if words >= 85 and elapsed < 6:
-            red_flags.append(f"Q{idx+1}: Pasted {words} words in {elapsed:.1f}s (Possible Copy-Paste/AI)")
-            pts = max(0.0, pts - 1.5)
-        if any(f in low for f in AI_FLAGS):
-            red_flags.append(f"Q{idx+1}: Robotic/AI phrasing detected")
+        txt, low, words = ans["text"], ans["text"].lower(), len(ans["text"].split())
+        keys = qs[idx][1]
+        hits = sum(1 for k in keys if k in low)
+        pts = round((min(1.0, hits / max(1, min(len(keys), 4))) * 6.0) + (min(1.0, words / max(min_w * 1.4, 25)) * 4.0), 1)
+        if words >= 80 and ans["sec"] < 6:
             pts = max(0.0, pts - 2.0)
-        if words < min_words:
-            red_flags.append(f"Q{idx+1}: Low-effort answer ({words} words)")
-            pts = min(pts, 4.0)
-
-        total_pts += pts
-        notes.append(f"Q{idx+1}: {pts}/10 ({hits}/{len(concepts)} key concepts, {words}w, {int(elapsed)}s)")
-
-    pct = round((total_pts / (len(questions) * 10.0)) * 100, 1)
-    verdict = "PASS" if pct >= pass_pct and len(red_flags) < 2 else ("BORDERLINE / INTERVIEW" if pct >= pass_pct - 8 else "FAIL")
-    summary = f"Strict Rubric Score: {pct}% (Pass threshold: {pass_pct}%). {'Strong technical & policy alignment.' if verdict == 'PASS' else 'Missing critical protocols, depth, or triggered red flags.'}"
-    return {"score_pct": pct, "verdict": verdict, "summary": summary, "red_flags": red_flags[:8], "breakdown": notes, "grader": "Local Strict Rubric"}
-
-
-async def grade_exam(exam_key: str, member, answers: list[dict]) -> dict:
-    """Grades the full exam using Gemini AI if configured, with automatic Local Rubric fallback."""
-    local_res = local_grade_exam(exam_key, answers)
-    if not GEMINI_KEY:
-        return local_res
-
-    title, pass_pct, min_words, questions = EXAMS[exam_key]
-    qa_text = "\n\n".join(
-        f"Q{i+1} ({questions[i][0]})\nExpected Concepts: {', '.join(questions[i][1])}\n"
-        f"Candidate Answer ({a['seconds']:.1f}s, {len(a['text'].split())}w): {a['text'][:900]}"
-        for i, a in enumerate(answers)
-    )
-    sys_p = (
-        "You are the ruthless Chief Administrative & Developer Exam Grader for Chicago Crossfire (Roblox RP). "
-        f"Exam: '{title}' | Pass Threshold: {pass_pct}% | Min Words: {min_words}. "
-        "Grade STRICTLY. Penalize vague answers, bias, missing proof protocols, or AI-generated essays. "
-        "Return ONLY valid JSON: {\"score_pct\": number (0-100), \"verdict\": \"PASS\"|\"BORDERLINE / INTERVIEW\"|\"FAIL\", "
-        "\"summary\": \"2-3 sharp sentences for Developers\", \"red_flags\": [\"short red flag\"], "
-        "\"breakdown\": [\"Q1: X/10 - brief note\"]}"
-    )
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_KEY}"
-    body = {
-        "contents": [{"parts": [{"text": f"CANDIDATE: {member} ({member.id})\n\n{qa_text}"}]}],
-        "systemInstruction": {"parts": [{"text": sys_p}]},
-        "generationConfig": {"temperature": 0.15, "responseMimeType": "application/json"},
-    }
-    try:
-        async with aiohttp.ClientSession() as s:
-            async with s.post(url, json=body, timeout=28) as r:
-                if r.status == 200:
-                    d = json.loads((await r.json())["candidates"][0]["content"]["parts"][0]["text"].strip())
-                    ai_flags = list(d.get("red_flags", [])) + [f for f in local_res["red_flags"] if "Pasted" in f]
-                    return {
-                        "score_pct": float(d.get("score_pct", local_res["score_pct"])),
-                        "verdict": str(d.get("verdict", local_res["verdict"])).upper(),
-                        "summary": str(d.get("summary", local_res["summary"]))[:800],
-                        "red_flags": ai_flags[:8],
-                        "breakdown": [str(x)[:140] for x in d.get("breakdown", local_res["breakdown"])][:15],
-                        "grader": "Gemini AI Strict Examiner",
-                    }
-    except Exception:
-        pass
-    return local_res
-
-# =====================================================================
-# PART 4 OF 5 — PASTE DIRECTLY BELOW PART 3 (FAR LEFT EDGE)
-# =====================================================================
-def build_exam_transcript(exam_key: str, member, answers: list[dict], res: dict, total_sec: float) -> bytes:
-    """Exports full Q&A, timing forensics, and grading breakdown to a .txt file for Developers."""
-    title, pass_pct, _, questions = EXAMS[exam_key]
-    now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    lines = [
-        "================================================================",
-        "   CHICAGO CROSSFIRE — OFFICIAL EXAM & GRADING REPORT           ",
-        "================================================================",
-        f"Exam        : {title}",
-        f"Candidate   : {member} (ID: {member.id})",
-        f"Completed   : {now} | Total Time: {int(total_sec // 60)}m {int(total_sec % 60)}s",
-        f"Grader      : {res['grader']}",
-        f"Final Score : {res['score_pct']}% (Pass Requirement: {pass_pct}%)",
-        f"Verdict     : {res['verdict']}",
-        f"Summary     : {res['summary']}",
-        "Red Flags   : " + ("; ".join(res["red_flags"]) if res["red_flags"] else "None"),
-        "================================================================\n",
-    ]
-    for i, a in enumerate(answers):
-        b_note = res["breakdown"][i] if i < len(res["breakdown"]) else ""
-        lines.append(f"--- QUESTION {i+1} ({int(a['seconds'])}s | {len(a['text'].split())} words) ---")
-        lines.append(f"PROMPT : {questions[i][0]}")
-        lines.append(f"ANSWER : {a['text']}")
-        if b_note:
-            lines.append(f"GRADE  : {b_note}")
-        lines.append("")
-    return "\n".join(lines).encode("utf-8")
-
-
-def local_grade_monitor(phase_key: str, events: list[dict]) -> dict:
-    """Grades real monitored ticket replies, public chat responses, and mod actions."""
-    title, pass_pct, scope, _, _ = MONITOR_PHASES[phase_key]
-    if not events:
-        return {
-            "score_pct": 0.0,
-            "verdict": "FAIL",
-            "summary": "Zero monitored ticket or moderation actions were recorded during oversight.",
-            "red_flags": ["No activity recorded during active phase"],
-            "breakdown": ["No recorded interactions"],
-            "grader": "Local Live-Oversight Rubric",
-        }
-
-    total_pts = 0.0
-    breakdown, red_flags = [], []
-
-    for idx, ev in enumerate(events, 1):
-        kind = ev["kind"]
-        if kind == "mod_action":
-            pts = 9.0
-            total_pts += pts
-            breakdown.append(f"#{idx} [Mod Action] {ev['action']} on {ev['target']} — {pts}/10")
-            continue
-
-        txt, low, words, delay, ch_name = ev["text"], ev["text"].lower(), len(ev["text"].split()), ev.get("delay_sec"), ev["channel"]
-        pts = 5.5
-        vocab = GOOD_TICKET_W if kind == "ticket_reply" else GOOD_MOD_W
-        pts += min(2.5, sum(1 for w in vocab if w in low) * 0.9)
-        if words >= 8:
-            pts += 1.2
-        elif words <= 3:
-            pts -= 2.0
-            red_flags.append(f"#{idx} (#{ch_name}): Very short/low-effort reply ('{txt[:40]}')")
-
-        if delay is not None:
-            if delay <= 90:
-                pts += 0.8
-            elif delay > 600:
-                pts -= 0.8
-                red_flags.append(f"#{idx} (#{ch_name}): Slow response time ({int(delay // 60)}m)")
-
-        if any(rw in low for rw in RUDE_W):
-            pts = max(0.0, pts - 5.0)
-            red_flags.append(f"#{idx} (#{ch_name}): Unprofessional/hostile phrasing detected")
-
-        pts = round(max(0.0, min(10.0, pts)), 1)
-        total_pts += pts
-        spd = f", {int(delay)}s reply" if delay is not None else ""
-        breakdown.append(f"#{idx} [#{ch_name}] {pts}/10 ({words}w{spd})")
-
-    pct = round((total_pts / (len(events) * 10.0)) * 100, 1)
-    verdict = "PASS" if pct >= pass_pct and not any("Unprofessional" in r for r in red_flags) else ("BORDERLINE / INTERVIEW" if pct >= pass_pct - 10 else "FAIL")
-    summary = f"Monitored {len(events)} real {scope} action(s) with an overall score of {pct}% (Pass: {pass_pct}%). {'Professional, timely, and thorough handling.' if verdict == 'PASS' else 'Needs improvement in depth, speed, or professionalism.'}"
-    return {"score_pct": pct, "verdict": verdict, "summary": summary, "red_flags": red_flags[:8], "breakdown": breakdown[:15], "grader": "Local Live-Oversight Rubric"}
-
-
-async def grade_monitor(phase_key: str, member, events: list[dict]) -> dict:
-    """Uses Gemini AI (if enabled) or Local Live-Oversight Rubric to grade real mod actions."""
-    local_res = local_grade_monitor(phase_key, events)
-    if not GEMINI_KEY or not events:
-        return local_res
-
-    title, pass_pct, scope, _, _ = MONITOR_PHASES[phase_key]
-    log_txt = "\n\n".join(
-        (
-            f"EVENT #{i+1} [{ev['kind'].upper()} in #{ev['channel']}] "
-            f"(Response Delay: {int(ev['delay_sec']) if ev.get('delay_sec') is not None else 'N/A'}s)\n"
-            f"PLAYER/CONTEXT ABOVE: {ev.get('context', 'N/A')}\n"
-            f"MOD RESPONSE: {ev.get('text', ev.get('action', ''))}"
-        )
-        if ev["kind"] != "mod_action"
-        else f"EVENT #{i+1} [MOD AUDIT ACTION]: {ev['action']} on {ev['target']} (Reason: {ev.get('reason', 'None')})"
-        for i, ev in enumerate(events)
-    )
-    sys_p = (
-        "You are the strict Moderation Oversight Evaluator for Chicago Crossfire (Roblox RP). "
-        f"Evaluating '{title}' (Scope: {scope}, Pass Threshold: {pass_pct}%). "
-        "Grade how the Trial Mod ACTUALLY responded to players in tickets/chats: check tone, speed, "
-        "asking for Roblox username/proof/clips, citing rules accurately, avoiding bias/hostility, and avoiding lazy 2-word answers. "
-        "Return ONLY valid JSON: {\"score_pct\": number (0-100), \"verdict\": \"PASS\"|\"BORDERLINE / INTERVIEW\"|\"FAIL\", "
-        "\"summary\": \"2-3 direct sentences for Developers\", \"red_flags\": [\"short issue\"], "
-        "\"breakdown\": [\"#1 (#channel): X/10 - brief note\"]}"
-    )
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_KEY}"
-    body = {
-        "contents": [{"parts": [{"text": f"MOD CANDIDATE: {member} ({member.id})\n\nLIVE MONITORED LOGS:\n{log_txt[:6000]}"}]}],
-        "systemInstruction": {"parts": [{"text": sys_p}]},
-        "generationConfig": {"temperature": 0.15, "responseMimeType": "application/json"},
-    }
-    try:
-        async with aiohttp.ClientSession() as s:
-            async with s.post(url, json=body, timeout=25) as r:
-                if r.status == 200:
-                    d = json.loads((await r.json())["candidates"][0]["content"]["parts"][0]["text"].strip())
-                    return {
-                        "score_pct": float(d.get("score_pct", local_res["score_pct"])),
-                        "verdict": str(d.get("verdict", local_res["verdict"])).upper(),
-                        "summary": str(d.get("summary", local_res["summary"]))[:800],
-                        "red_flags": [str(x)[:160] for x in d.get("red_flags", local_res["red_flags"])][:8],
-                        "breakdown": [str(x)[:140] for x in d.get("breakdown", local_res["breakdown"])][:15],
-                        "grader": "Gemini AI Live Oversight Grader",
-                    }
-    except Exception:
-        pass
-    return local_res
-
-
-def build_monitor_transcript(phase_key: str, member, events: list[dict], res: dict, total_sec: float) -> bytes:
-    """Generates a full .txt dossier of every real ticket reply, chat message, and mod action observed."""
-    title, pass_pct, scope, _, _ = MONITOR_PHASES[phase_key]
-    now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    lines = [
-        "================================================================",
-        "   CHICAGO CROSSFIRE — LIVE PHASE OVERSIGHT & GRADING DOSSIER   ",
-        "================================================================",
-        f"Phase       : {title} ({scope})",
-        f"Candidate   : {member} (ID: {member.id})",
-        f"Completed   : {now} | Oversight Duration: {int(total_sec // 60)}m {int(total_sec % 60)}s",
-        f"Grader      : {res['grader']}",
-        f"Final Score : {res['score_pct']}% (Pass Requirement: {pass_pct}%)",
-        f"Verdict     : {res['verdict']}",
-        f"Summary     : {res['summary']}",
-        "Red Flags   : " + ("; ".join(res["red_flags"]) if res["red_flags"] else "None"),
-        "================================================================\n",
-    ]
-    for i, ev in enumerate(events, 1):
-        ts = datetime.datetime.fromtimestamp(ev["ts"], datetime.timezone.utc).strftime("%H:%M:%S UTC")
-        if ev["kind"] == "mod_action":
-            lines.append(f"[{ts}] EVENT #{i} — AUDIT MOD ACTION: {ev['action']} on {ev['target']}")
-            lines.append(f"  Reason: {ev.get('reason', 'None')}\n")
+            breakdown.append(f"Q{idx+1}: {pts}/10 ⚠️ Fast paste ({words}w in {ans['sec']:.1f}s)")
         else:
-            delay_s = f" | Reply Delay: {int(ev['delay_sec'])}s" if ev.get("delay_sec") is not None else ""
-            lines.append(f"[{ts}] EVENT #{i} — {ev['kind'].upper()} in #{ev['channel']}{delay_s}")
-            if ev.get("context"):
-                lines.append(f"  Player/Context : {ev['context']}")
-            lines.append(f"  Mod Response   : {ev['text']}")
-            if i - 1 < len(res["breakdown"]):
-                lines.append(f"  Grade Note     : {res['breakdown'][i - 1]}")
-            lines.append("")
-    return "\n".join(lines).encode("utf-8")
+            breakdown.append(f"Q{idx+1}: {pts}/10 ({hits}/{len(keys)} key points, {words}w)")
+        total += pts
+        lines.extend([f"\nQ{idx+1}: {qs[idx][0]}", f"ANSWER ({words}w, {int(ans['sec'])}s): {txt}", f"SCORE: {pts}/10"])
+    pct = round((total / (len(qs) * 10.0)) * 100, 1)
+    verdict = "PASS" if pct >= pass_pct else ("BORDERLINE / ORAL BOARD" if pct >= pass_pct - 8 else "FAIL")
+    lines.insert(1, f"Final Score: {pct}% (Pass: {pass_pct}%) | Verdict: {verdict}\n")
+    return pct, verdict, breakdown, "\n".join(lines).encode("utf-8")
 
 
-# --- 4. EXAM & LIVE OVERSIGHT LIFECYCLE ---
-async def post_next_question(ch: discord.abc.Messageable, sess: dict) -> None:
-    """Posts the next exam question with minimum word rules."""
-    title, _, min_w, questions = EXAMS[sess["exam_key"]]
-    idx = sess["q_idx"]
-    sess["q_start"] = time.time()
-    emb = discord.Embed(
-        title=f"📝 Question {idx + 1} of {len(questions)} — {title}",
-        description=f"**{questions[idx][0]}**",
-        color=discord.Color.from_rgb(220, 53, 69) if sess["exam_key"] == "chief11" else discord.Color.blurple(),
-    )
-    emb.set_footer(text=f"Minimum {min_w} words required • Type your answer in chat below (or type 'cancel' to forfeit)")
-    await ch.send(content=f"<@{sess['user_id']}>", embed=emb)
-
-
-def parse_phase_request(msg: discord.Message, bot_id: int):
-    """Parses chat requests formatted as: Name: @user / Phase: 1-5 (or Staff/Admin/Chief) / @Bot."""
-    raw = re.sub(rf"<@!?{bot_id}>", "", msg.content or "").strip()
-    phase_m = re.search(r"phase\s*[:\-]\s*([^\n]+)", raw, re.IGNORECASE)
-    if not phase_m:
-        return None, None
-
-    val = phase_m.group(1).strip().lower()
-    exam_key = None
-    if "chief" in val or re.search(r"\b11\b", val):
-        exam_key = "chief11"
-    elif "full admin" in val or re.search(r"\b13\b", val):
-        exam_key = "admin13"
-    elif "admin" in val or re.search(r"\b10\b", val):
-        exam_key = "admin10"
-    elif "staff" in val:
-        exam_key = "staff3"
-    else:
-        num_m = re.search(r"\b([1-5])\b", val)
-        if num_m:
-            exam_key = f"phase{num_m.group(1)}"
-
-    other_mentions = [m for m in msg.mentions if m.id != bot_id]
-    return (other_mentions[0] if other_mentions else msg.author), exam_key
-
-
-async def send_candidate_dm_intro(u: discord.Member, emb: discord.Embed, extra_line: str = "") -> None:
-    """Sends a private DM copy of the official Starting Message & Phase Introduction."""
-    try:
-        await u.send(content=f"🔥 **Your Chicago Crossfire Phase Has Officially Started!** {extra_line}".strip(), embed=emb)
-    except Exception:
-        pass
-
-
-async def launch_exam_room(g: discord.Guild, u: discord.Member, exam_key: str, requested_by: discord.Member = None):
-    """Creates a private overseen exam room, posts the Starting Message & Intro, and DMs the candidate."""
-    for ch_id, s in ACTIVE_EXAMS.items():
+async def start_management_trial(g: discord.Guild, u: discord.Member, rank_key: str) -> str:
+    """Opens a private Management Trial room, posts Starting Intro with Avatar & asks Q1."""
+    for cid, s in ACTIVE_TRIALS.items():
         if s["guild_id"] == g.id and s["user_id"] == u.id:
-            return None, None, f"⚠️ {u.mention} already has an active exam running in <#{ch_id}>!"
+            return f"⚠️ {u.mention} already has an active trial in <#{cid}>!"
 
     c = gcfg(g.id)
-    dev_role = g.get_role(c.get("dev_role", 0))
-    cat = g.get_channel(c.get("exam_cat", 0))
-    if not isinstance(cat, discord.CategoryChannel):
-        cat = None
-
-    title = EXAMS[exam_key][0]
-    safe = re.sub(r"[^a-z0-9-]", "", u.name.lower())[:14] or "user"
+    title, pass_pct, min_w, col, intro, qs = TRIALS[rank_key]
+    cat = g.get_channel(c["cat_id"])
+    cat = cat if isinstance(cat, discord.CategoryChannel) else None
     ow = {
         g.default_role: discord.PermissionOverwrite(view_channel=False),
         u: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
-        g.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_channels=True, read_message_history=True, attach_files=True),
+        g.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_channels=True, read_message_history=True),
     }
-    if dev_role:
-        ow[dev_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
+    for rid in (c["dev_role"], c["chief_role"]):
+        role = g.get_role(rid)
+        if role:
+            ow[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
 
+    safe = re.sub(r"[^a-z0-9-]", "", u.name.lower())[:14] or "user"
     try:
-        exam_ch = await g.create_text_channel(name=f"exam-{exam_key}-{safe}"[:80], category=cat, overwrites=ow, topic=f"CCExam | Key:{exam_key} | UserID:{u.id}")
+        tch = await g.create_text_channel(name=f"trial-{rank_key}-{safe}", category=cat, overwrites=ow, topic=f"MgmtTrial | Key:{rank_key} | UserID:{u.id}")
     except discord.Forbidden:
-        return None, None, "❌ Bot needs **Manage Channels** permission to open the exam room!"
-
-    sess = {"guild_id": g.id, "user_id": u.id, "exam_key": exam_key, "q_idx": 0, "answers": [], "started_at": time.time(), "q_start": time.time(), "warnings": 0}
-    ACTIVE_EXAMS[exam_ch.id] = sess
-
-    intro_emb = build_starting_intro_embed(g, u, exam_key, requested_by=requested_by, exam_ch=exam_ch, is_monitor=False)
-    await exam_ch.send(
-        content=f"📣 {u.mention} {dev_role.mention if dev_role else ''} — **Read your official Phase Starting Introduction below!**".strip(),
-        embed=intro_emb,
-        view=LiveExamControls(),
-    )
-    asyncio.create_task(send_candidate_dm_intro(u, intro_emb, f"Head into {exam_ch.mention} to begin!"))
-    await asyncio.sleep(2)
-    await post_next_question(exam_ch, sess)
-
-    rep_ch = g.get_channel(c.get("report_ch", 0))
-    if rep_ch:
-        try:
-            await rep_ch.send(f"👁️ **Live Exam Started:** {u.mention} (`{title}`) — Oversee live in {exam_ch.mention}.")
-        except Exception:
-            pass
-    return exam_ch, intro_emb, f"✅ Phase request accepted for {u.mention} (**{title}**)! Private room opened: {exam_ch.mention}"
-
-
-async def start_phase_monitor(g: discord.Guild, u: discord.Member, phase_key: str, req_ch, requested_by: discord.Member = None):
-    """Starts live operational monitoring (Phases 1-3) and builds the full Starting Message & Intro."""
-    mkey = (g.id, u.id)
-    if mkey in ACTIVE_MONITORS:
-        cur = ACTIVE_MONITORS[mkey]
-        return None, f"⚠️ {u.mention} is already being monitored for **`{MONITOR_PHASES[cur['phase_key']][0]}`** (`{len(cur['events'])}/{cur['target']}` actions logged)."
-
-    title, _, scope, target_n, _ = MONITOR_PHASES[phase_key]
-    ACTIVE_MONITORS[mkey] = {
-        "guild_id": g.id, "user_id": u.id, "phase_key": phase_key, "scope": scope, "target": target_n,
-        "events": [], "started_at": time.time(), "req_ch_id": getattr(req_ch, "id", 0), "requested_by": requested_by.id if requested_by else u.id,
-    }
-    intro_emb = build_starting_intro_embed(g, u, phase_key, requested_by=requested_by, is_monitor=True)
-    asyncio.create_task(send_candidate_dm_intro(u, intro_emb, "Live Oversight is now active on your account!"))
-
-    rep_ch = g.get_channel(gcfg(g.id).get("report_ch", 0))
-    if rep_ch:
-        try:
-            await rep_ch.send(f"👁️ **Live Oversight Started:** Monitoring {u.mention} for **`{title}`** (`{scope}`).")
-        except Exception:
-            pass
-    return intro_emb, f"✅ Starting message sent & Live Oversight active for {u.mention} (`{title}`)!"
-
-# =====================================================================
-# PART 5 OF 5 — PASTE DIRECTLY BELOW PART 4 (FAR LEFT EDGE)
-# =====================================================================
-async def finish_monitor_and_report(bot: commands.Bot, g: discord.Guild, uid: int, notify_ch=None, aborted_reason: str = "") -> None:
-    """Grades a completed Phase 1-3 live oversight session and sends the full dossier to Developers."""
-    sess = ACTIVE_MONITORS.pop((g.id, uid), None)
-    if not sess:
-        return
-
-    phase_key = sess["phase_key"]
-    title, pass_pct, scope, _, _ = MONITOR_PHASES[phase_key]
-    total_sec = time.time() - sess["started_at"]
-    c = gcfg(g.id)
-    rep_ch = g.get_channel(c.get("report_ch", 0))
-    dev_ping = f"<@&{c['dev_role']}>" if c.get("dev_role") else "**Developers**"
-    member = g.get_member(uid) or discord.Object(id=uid)
-
-    if aborted_reason:
-        if notify_ch:
-            try:
-                await notify_ch.send(f"🛑 Live oversight for <@{uid}> (`{title}`) cancelled: `{aborted_reason}`.")
-            except Exception:
-                pass
-        if rep_ch:
-            try:
-                await rep_ch.send(f"🛑 {dev_ping} — Live oversight for <@{uid}> (`{title}`) was aborted (`{aborted_reason}`).")
-            except Exception:
-                pass
-        return
-
-    res = await grade_monitor(phase_key, member, sess["events"])
-    raw_txt = build_monitor_transcript(phase_key, member, sess["events"], res, total_sec)
-    fname = f"oversight-{phase_key}-{uid}-{datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%d-%H%M')}.txt"
-
-    cand = c["candidates"].setdefault(str(uid), {"history": [], "passed": []})
-    cand["history"].append({"exam": phase_key, "score": res["score_pct"], "verdict": res["verdict"], "ts": int(time.time())})
-    cand["history"] = cand["history"][-20:]
-    save_db()
-
-    v = res["verdict"]
-    col = discord.Color.green() if v == "PASS" else (discord.Color.gold() if "BORDERLINE" in v else discord.Color.red())
-    badge = "🟢 RECOMMENDED PASS" if v == "PASS" else ("🟡 BORDERLINE / REVIEW" if "BORDERLINE" in v else "🔴 RECOMMENDED FAIL")
-
-    rep_emb = discord.Embed(
-        title=f"👁️ DEVELOPER LIVE OVERSIGHT REPORT — {badge}",
-        description=(
-            f"👤 **Moderation Member:** <@{uid}> (ID: `{uid}`)\n"
-            f"📋 **Phase:** `{title}` (`{scope}` monitoring)\n"
-            f"📊 **Observed Actions:** `{len(sess['events'])}` • ⏱️ **Duration:** `{int(total_sec//60)}m {int(total_sec%60)}s`\n"
-            f"🧠 **Grader:** `{res['grader']}`"
-        ),
-        color=col,
-        timestamp=discord.utils.utcnow(),
-    )
-    if isinstance(member, discord.Member):
-        rep_emb.set_thumbnail(url=member.display_avatar.url)
-    rep_emb.add_field(name="🎯 Performance Score", value=f"**`{res['score_pct']}%`** *(Pass: `{pass_pct}%`)*", inline=True)
-    rep_emb.add_field(name="⚖️ Auto-Verdict", value=f"**`{v}`**", inline=True)
-    rep_emb.add_field(name="🚩 Red Flags", value=f"`{len(res['red_flags'])}` flagged", inline=True)
-    rep_emb.add_field(name="🧠 Overseer Summary", value=res["summary"][:950], inline=False)
-    rep_emb.add_field(name="📝 Monitored Ticket / Mod Breakdown", value="\n".join(f"• {x}" for x in res["breakdown"][:12])[:1000] or "See dossier", inline=False)
-    if res["red_flags"]:
-        rep_emb.add_field(name="⚠️ Performance Red Flags", value="\n".join(f"• {f}" for f in res["red_flags"])[:900], inline=False)
-    rep_emb.set_footer(text=f"ExamKey:{phase_key} | CandidateID:{uid} • Developers: Click below to finalize!")
-
-    if rep_ch:
-        try:
-            await rep_ch.send(content=f"📣 {dev_ping} — Live oversight report ready for <@{uid}> (`{title}`)!", embed=rep_emb, file=discord.File(io.BytesIO(raw_txt), filename=fname), view=DevVerdictView())
-        except Exception as e:
-            print(f"Monitor report error: {e}")
-
-    target_ch = notify_ch or g.get_channel(sess.get("req_ch_id", 0))
-    if target_ch:
-        try:
-            await target_ch.send(f"✅ **Live Oversight Complete for <@{uid}> (`{title}`)!**\n🎯 **Score:** **`{res['score_pct']}%`** (`{v}`) across `{len(sess['events'])}` action(s).\n📣 Full dossier sent to **Developers**!")
-        except Exception:
-            pass
-
-
-async def start_exam_session(i: discord.Interaction, exam_key: str) -> None:
-    """Routes Phases 1-3 to Live Operational Oversight and Phases 4-5 / Admin tracks to Exam Rooms."""
-    if exam_key in MONITOR_PHASES:
-        emb, note = await start_phase_monitor(i.guild, i.user, exam_key, i.channel, requested_by=i.user)
-        if not emb:
-            return await i.followup.send(note, ephemeral=True)
-        await i.channel.send(content=f"📣 {i.user.mention} — **Your Official Phase Starting Introduction:**", embed=emb, view=MonitorControlView())
-        return await i.followup.send(note, ephemeral=True)
-
-    exam_ch, intro_emb, note = await launch_exam_room(i.guild, i.user, exam_key, requested_by=i.user)
-    if exam_ch and intro_emb:
-        await i.channel.send(content=f"📣 {i.user.mention} — **Phase Request Accepted! Head into {exam_ch.mention}:**", embed=intro_emb)
-    await i.followup.send(note, ephemeral=True)
-
-
-async def finish_and_report(bot: commands.Bot, ch: discord.TextChannel, sess: dict, aborted_reason: str = "") -> None:
-    """Grades the completed exam, sends full report + transcript to Developers, and closes the room."""
-    ACTIVE_EXAMS.pop(ch.id, None)
-    g, u, exam_key = ch.guild, ch.guild.get_member(sess["user_id"]), sess["exam_key"]
-    title, pass_pct, _, _ = EXAMS[exam_key]
-    total_sec = time.time() - sess["started_at"]
-    c = gcfg(g.id)
-    rep_ch = g.get_channel(c.get("report_ch", 0))
-    dev_ping = f"<@&{c['dev_role']}>" if c.get("dev_role") else "**Developers**"
-
-    if aborted_reason:
-        await ch.send(f"🛑 **Exam Terminated:** `{aborted_reason}`. Reporting to Developers & closing room in 8s...")
-        if rep_ch:
-            await rep_ch.send(f"🛑 {dev_ping} — <@{sess['user_id']}> **forfeited/aborted** `{title}` (`{aborted_reason}`) after `{len(sess['answers'])}` answer(s).")
-        await asyncio.sleep(8)
-        try:
-            await ch.delete(reason=f"Exam aborted: {aborted_reason}")
-        except Exception:
-            pass
-        return
-
-    await ch.send("⏳ **All answers locked!** Overseer is strictly grading your exam and transmitting the report to **Developers**...")
-    res = await grade_exam(exam_key, u or discord.Object(id=sess["user_id"]), sess["answers"])
-    raw_txt = build_exam_transcript(exam_key, u or discord.Object(id=sess["user_id"]), sess["answers"], res, total_sec)
-    fname = f"exam-{exam_key}-{sess['user_id']}-{datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%d-%H%M')}.txt"
-
-    cand = c["candidates"].setdefault(str(sess["user_id"]), {"history": [], "passed": []})
-    cand["history"].append({"exam": exam_key, "score": res["score_pct"], "verdict": res["verdict"], "ts": int(time.time())})
-    cand["history"] = cand["history"][-20:]
-    save_db()
-
-    v = res["verdict"]
-    col = discord.Color.green() if v == "PASS" else (discord.Color.gold() if "BORDERLINE" in v else discord.Color.red())
-    badge = "🟢 RECOMMENDED PASS" if v == "PASS" else ("🟡 BORDERLINE / ORAL INTERVIEW" if "BORDERLINE" in v else "🔴 RECOMMENDED FAIL")
-
-    rep_emb = discord.Embed(
-        title=f"📊 DEVELOPER EXAM REPORT — {badge}",
-        description=f"👤 **Candidate:** <@{sess['user_id']}> (ID: `{sess['user_id']}`)\n📋 **Track:** `{title}` (`{exam_key}`)\n⏱️ **Duration:** `{int(total_sec//60)}m {int(total_sec%60)}s` • 🧠 **Grader:** `{res['grader']}`",
-        color=col,
-        timestamp=discord.utils.utcnow(),
-    )
-    if u:
-        rep_emb.set_thumbnail(url=u.display_avatar.url)
-    rep_emb.add_field(name="🎯 Score", value=f"**`{res['score_pct']}%`** *(Pass: `{pass_pct}%`)*", inline=True)
-    rep_emb.add_field(name="⚖️ Auto-Verdict", value=f"**`{v}`**", inline=True)
-    rep_emb.add_field(name="🚩 Red Flags", value=f"`{len(res['red_flags'])}` detected", inline=True)
-    rep_emb.add_field(name="🧠 Examiner Summary", value=res["summary"][:950], inline=False)
-    rep_emb.add_field(name="📝 Per-Question Breakdown", value="\n".join(f"• {x}" for x in res["breakdown"][:13])[:1000] or "See transcript", inline=False)
-    if res["red_flags"]:
-        rep_emb.add_field(name="⚠️ Anti-Cheat & Red-Flag Alerts", value="\n".join(f"• {f}" for f in res["red_flags"])[:900], inline=False)
-    rep_emb.set_footer(text=f"ExamKey:{exam_key} | CandidateID:{sess['user_id']} • Developers: Use buttons below to finalize!")
-
-    if rep_ch:
-        try:
-            await rep_ch.send(content=f"📣 {dev_ping} — New graded exam submitted by <@{sess['user_id']}>!", embed=rep_emb, file=discord.File(io.BytesIO(raw_txt), filename=fname), view=DevVerdictView())
-        except Exception as e:
-            print(f"Report send error: {e}")
-
-    await ch.send(f"✅ **Exam Submitted & Reported to Developers!**\n🎯 **Score:** **`{res['score_pct']}%`** (`{v}`)\n📣 Developers will DM your official verdict. Closing room in **12s**...")
-    await asyncio.sleep(12)
-    try:
-        await ch.delete(reason=f"Exam completed ({res['score_pct']}%)")
-    except Exception:
-        pass
-
-
-# --- 5. PERSISTENT INTERACTIVE VIEWS ---
-class ExamSelect(discord.ui.Select):
-    def __init__(self):
-        options = [
-            discord.SelectOption(label="Phase 1 — Live Ticket Response Oversight", value="phase1", emoji="🎫", description="Monitors how you respond to real tickets (Pass: 85%)"),
-            discord.SelectOption(label="Phase 2 — Live Chat & Mod Oversight", value="phase2", emoji="👁️", description="Monitors public chat handling & mod actions (Pass: 85%)"),
-            discord.SelectOption(label="Phase 3 — Hybrid Ticket + Mod Oversight", value="phase3", emoji="🔎", description="Monitors tickets, forensics & mod actions (Pass: 88%)"),
-            discord.SelectOption(label="Phase 4 — Live Ambush & Stress Test (5Q)", value="phase4", emoji="⚡", description="Written/scenario ambush room (Pass: 88%)"),
-            discord.SelectOption(label="Phase 5 — Chief Admin Final Board (4Q)", value="phase5", emoji="🏛️", description="Final board + Phase 1-4 audit dossier (Pass: 90%)"),
-            discord.SelectOption(label="Staff Gauntlet (3 Hard Questions)", value="staff3", emoji="👥", description="Pass: 85% • High-pressure Staff entry exam"),
-            discord.SelectOption(label="Admin Vetting Exam (10 Questions)", value="admin10", emoji="🛡️", description="Pass: 90% • Technical & ethical Admin screening"),
-            discord.SelectOption(label="Chief Administrative — HELL MODE (11Q)", value="chief11", emoji="🔥", description="Pass: 92% • Brutal executive crisis & IA gauntlet"),
-            discord.SelectOption(label="Full Administrator Exam (13 Questions)", value="admin13", emoji="⚔️", description="Pass: 88% • Full 13-question Admin mastery exam"),
-        ]
-        super().__init__(placeholder="🔥 Select a Phase or Exam to Request...", min_values=1, max_values=1, options=options, custom_id="ccx:select")
-
-    async def callback(self, i: discord.Interaction):
-        await i.response.defer(ephemeral=True)
-        await start_exam_session(i, self.values[0])
-
-
-class ExamRequestPanel(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-        self.add_item(ExamSelect())
-
-
-class MonitorControlView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    def _parse(self, emb):
-        ft = (emb.footer.text if emb and emb.footer else "") or ""
-        km, um = re.search(r"MonitorKey:([a-z0-9]+)", ft), re.search(r"CandidateID:(\d+)", ft)
-        return (km.group(1) if km else "phase1"), (int(um.group(1)) if um else 0)
-
-    @discord.ui.button(label="Grade & Report to Devs Now", style=discord.ButtonStyle.success, emoji="📊", custom_id="ccmon:finish")
-    async def b_fin(self, i: discord.Interaction, b: discord.ui.Button):
-        _, uid = self._parse(i.message.embeds[0] if i.message.embeds else None)
-        if not (is_dev_or_admin(i.user) or i.user.id == uid):
-            return await i.response.send_message("❌ Developers or the monitored member only.", ephemeral=True)
-        sess = ACTIVE_MONITORS.get((i.guild.id, uid))
-        if not sess:
-            return await i.response.send_message("⚠️ No active live monitor found.", ephemeral=True)
-        if not sess["events"] and not is_dev_or_admin(i.user):
-            return await i.response.send_message("⚠️ Complete at least 1 monitored ticket/chat response first!", ephemeral=True)
-        for item in self.children:
-            item.disabled = True
-        await i.response.edit_message(view=self)
-        asyncio.create_task(finish_monitor_and_report(i.client, i.guild, uid, notify_ch=i.channel))
-
-    @discord.ui.button(label="Take Written Drill Instead", style=discord.ButtonStyle.primary, emoji="📝", custom_id="ccmon:exam")
-    async def b_exam(self, i: discord.Interaction, b: discord.ui.Button):
-        ekey, uid = self._parse(i.message.embeds[0] if i.message.embeds else None)
-        if not (is_dev_or_admin(i.user) or i.user.id == uid):
-            return await i.response.send_message("❌ Developers or candidate only.", ephemeral=True)
-        await i.response.defer(ephemeral=True)
-        ACTIVE_MONITORS.pop((i.guild.id, uid), None)
-        _, _, note = await launch_exam_room(i.guild, i.guild.get_member(uid) or i.user, ekey, requested_by=i.user)
-        await i.followup.send(note, ephemeral=True)
-
-    @discord.ui.button(label="Dev: Cancel Oversight", style=discord.ButtonStyle.danger, emoji="🛑", custom_id="ccmon:abort")
-    async def b_ab(self, i: discord.Interaction, b: discord.ui.Button):
-        if not is_dev_or_admin(i.user):
-            return await i.response.send_message("❌ Developers / Admins only.", ephemeral=True)
-        _, uid = self._parse(i.message.embeds[0] if i.message.embeds else None)
-        for item in self.children:
-            item.disabled = True
-        await i.response.edit_message(view=self)
-        asyncio.create_task(finish_monitor_and_report(i.client, i.guild, uid, notify_ch=i.channel, aborted_reason=f"Cancelled by {i.user.display_name}"))
-
-
-class LiveExamControls(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @discord.ui.button(label="Dev: Abort & Flag Exam", style=discord.ButtonStyle.danger, emoji="🛑", custom_id="ccx:abort")
-    async def b_abort(self, i: discord.Interaction, b: discord.ui.Button):
-        if not is_dev_or_admin(i.user):
-            return await i.response.send_message("❌ Developers / Admins only.", ephemeral=True)
-        sess = ACTIVE_EXAMS.get(i.channel.id)
-        if not sess:
-            return await i.response.send_message("⚠️ No active exam in this channel.", ephemeral=True)
-        await i.response.send_message(f"🛑 Aborted by {i.user.mention}.", ephemeral=True)
-        asyncio.create_task(finish_and_report(i.client, i.channel, sess, aborted_reason=f"Terminated by Dev {i.user.display_name}"))
-
-
-class DevVerdictView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    def _parse(self, emb):
-        ft = (emb.footer.text if emb and emb.footer else "") or ""
-        km, um = re.search(r"ExamKey:([a-z0-9]+)", ft), re.search(r"CandidateID:(\d+)", ft)
-        return (km.group(1) if km else "unknown"), (int(um.group(1)) if um else 0)
-
-    async def _decide(self, i: discord.Interaction, status: str, color: discord.Color, dm_msg: str, grant_pass: bool = False):
-        if not is_dev_or_admin(i.user):
-            return await i.response.send_message("❌ Developers / Administrators only.", ephemeral=True)
-        emb = i.message.embeds[0]
-        ekey, uid = self._parse(emb)
-        etitle = EXAMS[ekey][0] if ekey in EXAMS else ekey
-        if grant_pass and uid:
-            c = gcfg(i.guild.id)
-            cand = c["candidates"].setdefault(str(uid), {"history": [], "passed": []})
-            if ekey not in cand["passed"]:
-                cand["passed"].append(ekey)
-            save_db()
-            role, mem = i.guild.get_role(c.get("approved_role", 0)), i.guild.get_member(uid)
-            if role and mem and ekey in ("phase5", "staff3", "admin10", "chief11", "admin13"):
-                try:
-                    await mem.add_roles(role, reason=f"Passed {etitle} (Approved by {i.user})")
-                except Exception:
-                    pass
-        for item in self.children:
-            item.disabled = True
-        emb.color = color
-        emb.add_field(name="🏛️ Final Developer Decision", value=f"**{status}** by {i.user.mention}", inline=False)
-        await i.response.edit_message(embed=emb, view=self)
-        if uid:
-            try:
-                usr = i.guild.get_member(uid) or await i.client.fetch_user(uid)
-                await usr.send(f"🔥 **Chicago Crossfire — Official Exam Result ({etitle})**\n**Decision:** {status}\n{dm_msg}")
-            except Exception:
-                pass
-
-    @discord.ui.button(label="Approve & Advance", style=discord.ButtonStyle.success, emoji="✅", custom_id="ccdv:pass")
-    async def b_pass(self, i: discord.Interaction, b: discord.ui.Button):
-        await self._decide(i, "✅ APPROVED / PASSED", discord.Color.brand_green(), "Congratulations! Developers have approved your phase and advanced your clearance.", grant_pass=True)
-
-    @discord.ui.button(label="Require Oral Board", style=discord.ButtonStyle.primary, emoji="🎙️", custom_id="ccdv:oral")
-    async def b_oral(self, i: discord.Interaction, b: discord.ui.Button):
-        await self._decide(i, "🎙️ ORAL INTERVIEW REQUIRED", discord.Color.gold(), "Developers have reviewed your submission and require a live oral board interrogation before final approval.")
-
-    @discord.ui.button(label="Fail Candidate", style=discord.ButtonStyle.danger, emoji="❌", custom_id="ccdv:fail")
-    async def b_fail(self, i: discord.Interaction, b: discord.ui.Button):
-        await self._decide(i, "❌ FAILED", discord.Color.dark_red(), "Your phase did not meet Chicago Crossfire standards. Review server protocols before re-requesting.")
-
-
-# --- 6. BOT CORE, LIVE LISTENERS & SLASH COMMANDS ---
-class ExamOverseerBot(commands.Bot):
-    def __init__(self, mi: bool = True, mem_i: bool = True):
-        it = discord.Intents.default()
-        it.message_content, it.members = mi, mem_i
-        super().__init__(command_prefix="!", intents=it, help_command=None)
-        self._synced = False
-
-    async def setup_hook(self):
-        for v in (ExamRequestPanel(), MonitorControlView(), LiveExamControls(), DevVerdictView()):
-            self.add_view(v)
-        if not self._synced:
-            try:
-                await self.tree.sync()
-                self._synced = True
-            except Exception as e:
-                print(f"Sync notice: {e}")
-
-    async def on_ready(self):
-        global BOT_STATUS
-        BOT_STATUS = f"ONLINE as {self.user}"
-        print(f"✅ Chicago Crossfire Exam Overseer ONLINE as {self.user}")
-        try:
-            await self.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name="Chicago Crossfire Oversight 🔥"))
-        except Exception:
-            pass
-
-    async def _log_audit_mod_action(self, g: discord.Guild, action_enum: discord.AuditLogAction, label: str, target_str: str):
-        if not any(gid == g.id and s["scope"] in ("public", "both") for (gid, _), s in ACTIVE_MONITORS.items()):
-            return
-        try:
-            async for entry in g.audit_logs(limit=3, action=action_enum):
-                if (discord.utils.utcnow() - entry.created_at).total_seconds() <= 10 and entry.user:
-                    sess = ACTIVE_MONITORS.get((g.id, entry.user.id))
-                    if sess and sess["scope"] in ("public", "both"):
-                        sess["events"].append({"kind": "mod_action", "channel": "audit-log", "action": label, "target": target_str, "reason": entry.reason or "None", "ts": time.time()})
-                        if len(sess["events"]) >= sess["target"]:
-                            asyncio.create_task(finish_monitor_and_report(self, g, entry.user.id))
-                    break
-        except Exception:
-            pass
-
-    async def on_member_update(self, before: discord.Member, after: discord.Member):
-        if before.timed_out_until != after.timed_out_until and after.timed_out_until is not None:
-            await self._log_audit_mod_action(after.guild, discord.AuditLogAction.member_update, "Timeout Applied", str(after))
-
-    async def on_message_delete(self, msg: discord.Message):
-        if msg.guild and not msg.author.bot:
-            await self._log_audit_mod_action(msg.guild, discord.AuditLogAction.message_delete, f"Message Deleted in #{msg.channel.name}", str(msg.author))
-
-    async def on_message(self, msg: discord.Message):
-        if msg.author.bot or not msg.guild:
-            return
-        await self.process_commands(msg)
-
-        # 1. Written Exam Room Handler (Phases 4-5 & Staff/Admin/Chief Admin)
-        sess = ACTIVE_EXAMS.get(msg.channel.id)
-        if sess:
-            if msg.author.id != sess["user_id"]:
-                return
-            txt = (msg.content or "").strip()
-            if not txt:
-                return
-            if txt.lower() in ("cancel", "forfeit", "quit"):
-                return await finish_and_report(self, msg.channel, sess, aborted_reason="Candidate typed cancel/forfeit")
-            _, _, min_w, questions = EXAMS[sess["exam_key"]]
-            words = len(txt.split())
-            if words < min_w:
-                sess["warnings"] += 1
-                if sess["warnings"] >= 3:
-                    return await finish_and_report(self, msg.channel, sess, aborted_reason="3x Low-Effort / Minimum-Word Violations")
-                return await msg.reply(f"⚠️ **Answer Rejected ({words}/{min_w} words)!** Write a full detailed response *(Warning `{sess['warnings']}/3` — 3 = Auto-Fail)*.")
-            sess["answers"].append({"text": txt[:1800], "seconds": time.time() - sess["q_start"]})
-            sess["q_idx"] += 1
-            try:
-                await msg.add_reaction("✅")
-            except Exception:
-                pass
-            if sess["q_idx"] < len(questions):
-                await post_next_question(msg.channel, sess)
-            else:
-                await finish_and_report(self, msg.channel, sess)
-            return
-
-        # 2. Live Operational Monitor Handler (Phases 1-3: Tickets & Public Chat)
-        mon = ACTIVE_MONITORS.get((msg.guild.id, msg.author.id))
-        if mon and self.user not in msg.mentions and (time.time() - mon["started_at"]) >= 4:
-            is_tkt, scope = is_ticket_channel(msg.channel), mon["scope"]
-            ok = (scope == "tickets" and is_tkt) or (scope == "public" and not is_tkt and msg.channel.id != mon["req_ch_id"]) or (scope == "both" and msg.channel.id != mon["req_ch_id"])
-            txt = (msg.content or "").strip()
-            if ok and txt:
-                context_str, delay_sec = "", None
-                try:
-                    async for prev in msg.channel.history(limit=6, before=msg):
-                        if prev.author.id != msg.author.id and (prev.content or prev.embeds):
-                            p_txt = prev.content[:180] if prev.content else f"[Embed: {prev.embeds[0].title or 'Panel'}]"
-                            context_str = f"{prev.author.display_name}: {p_txt}"
-                            delay_sec = max(0.0, (msg.created_at - prev.created_at).total_seconds())
-                            break
-                except Exception:
-                    pass
-                mon["events"].append({"kind": "ticket_reply" if is_tkt else "chat_reply", "channel": msg.channel.name, "text": txt[:900], "context": context_str, "delay_sec": delay_sec, "ts": time.time()})
-                if len(mon["events"]) >= mon["target"]:
-                    asyncio.create_task(finish_monitor_and_report(self, msg.guild, msg.author.id))
-
-        # 3. Chat Phase Request Listener (Name: @user / Phase: 1-5 / @Bot)
-        if self.user in msg.mentions:
-            candidate, exam_key = parse_phase_request(msg, self.user.id)
-            if not exam_key:
-                return await msg.reply(f"📋 **Phase Request Format Required:**\n```\nName: @user\nPhase: 1 / 2 / 3 / 4 / 5 (or Staff / Admin / Chief Admin)\n@{self.user.display_name}\n```")
-            if exam_key in MONITOR_PHASES:
-                intro_emb, note = await start_phase_monitor(msg.guild, candidate, exam_key, msg.channel, requested_by=msg.author)
-                if not intro_emb:
-                    return await msg.reply(note)
-                try:
-                    await msg.add_reaction("👁️")
-                except Exception:
-                    pass
-                return await msg.reply(content=f"📣 {candidate.mention} — **Welcome! Read your official Phase Starting Introduction below:**", embed=intro_emb, view=MonitorControlView())
-            exam_ch, intro_emb, note = await launch_exam_room(msg.guild, candidate, exam_key, requested_by=msg.author)
-            if not exam_ch or not intro_emb:
-                return await msg.reply(note)
-            try:
-                await msg.add_reaction("🔥")
-            except Exception:
-                pass
-            await msg.reply(content=f"📣 {candidate.mention} — **Phase Request Accepted! Read your Starting Introduction below & head into {exam_ch.mention}:**", embed=intro_emb)
-
-
-PHASE_CHOICES = [
-    app_commands.Choice(name="Phase 1 — Live Ticket Response Oversight", value="phase1"),
-    app_commands.Choice(name="Phase 2 — Live Chat & Mod Oversight", value="phase2"),
-    app_commands.Choice(name="Phase 3 — Hybrid Ticket + Mod Oversight", value="phase3"),
-    app_commands.Choice(name="Phase 4 — Live Ambush Stress Test (5Q)", value="phase4"),
-    app_commands.Choice(name="Phase 5 — Chief Admin Final Board (4Q)", value="phase5"),
-    app_commands.Choice(name="Staff Gauntlet (3 Hard Questions)", value="staff3"),
-    app_commands.Choice(name="Admin Vetting Exam (10 Questions)", value="admin10"),
-    app_commands.Choice(name="Chief Administrative — HELL MODE (11Q)", value="chief11"),
-    app_commands.Choice(name="Full Administrator Exam (13 Questions)", value="admin13"),
-]
-
-
-def reg_cmds(bot: ExamOverseerBot):
-    @bot.tree.command(name="exam_setup", description="Set Developer Role, Dev Report Channel, Exam Category & optional Approved Role")
-    async def s_setup(i: discord.Interaction, developer_role: discord.Role, dev_report_channel: discord.TextChannel, exam_category: discord.CategoryChannel, approved_role: discord.Role = None):
-        if not i.user.guild_permissions.administrator:
-            return await i.response.send_message("❌ Administrators only.", ephemeral=True)
-        gcfg(i.guild.id).update({"dev_role": developer_role.id, "report_ch": dev_report_channel.id, "exam_cat": exam_category.id, "approved_role": approved_role.id if approved_role else 0})
-        save_db()
-        await i.response.send_message(f"✅ **Chicago Crossfire Overseer Ready!**\n🛠️ Devs: {developer_role.mention} | 📊 Reports: {dev_report_channel.mention} | 📁 Rooms: `{exam_category.name}`\n👉 Run **`/exam_panel`** in `#phase-requests`!", ephemeral=True)
-
-    @bot.tree.command(name="exam_panel", description="Post the Chicago Crossfire Phase Request & Hardcore Exam Center")
-    async def s_panel(i: discord.Interaction):
-        if not is_dev_or_admin(i.user):
-            return await i.response.send_message("❌ Developers / Admins only.", ephemeral=True)
-        emb = discord.Embed(
-            title="🔥 CHICAGO CROSSFIRE — PHASE OVERSEER & EXAM CENTER",
-            description=(
-                "Request your **Mod Trial Phase (1–5)** or **Staff / Admin / Chief Admin Exam** using the format below or the dropdown:\n\n"
-                f"```\nName: @user\nPhase: 1 / 2 / 3 / 4 / 5 (or Staff / Admin / Chief Admin)\n@{bot.user.display_name}\n```\n"
-                "🎫 **Phases 1–3:** Live Ticket & Chat Oversight • ⚡ **Phases 4–5 & Admin Tracks:** Private Stress Tests & Final Boards\n"
-                "📣 *Sends your official Starting Intro (with profile avatar), grades automatically & reports straight to **Developers**!*"
-            ),
-            color=discord.Color.from_rgb(220, 53, 69),
-        )
-        await i.response.send_message(embed=emb, view=ExamRequestPanel())
-
-    @bot.tree.command(name="request_phase", description="Directly request a Live Oversight Phase (1-3) or Exam (4-5 / Staff / Admin)")
-    @app_commands.choices(exam=PHASE_CHOICES)
-    async def s_req(i: discord.Interaction, exam: app_commands.Choice[str]):
-        await i.response.defer(ephemeral=True)
-        await start_exam_session(i, exam.value)
-
-    @bot.tree.command(name="phase_intro", description="Post the official Starting Message & Phase Introduction for any phase/candidate")
-    @app_commands.choices(phase=PHASE_CHOICES)
-    async def s_intro(i: discord.Interaction, phase: app_commands.Choice[str], member: discord.Member = None):
-        if not is_dev_or_admin(i.user):
-            return await i.response.send_message("❌ Developers / Admins only.", ephemeral=True)
-        emb = build_starting_intro_embed(i.guild, member, phase.value, requested_by=i.user, is_monitor=(phase.value in MONITOR_PHASES))
-        await i.response.send_message(content=f"📣 {member.mention} — **Official Phase Starting Introduction:**" if member else "📣 **Official Phase Introduction:**", embed=emb)
-
-    @bot.tree.command(name="finish_phase", description="Developers: Immediately grade & close a member's active Phase 1-3 live monitor")
-    async def s_fin(i: discord.Interaction, member: discord.Member):
-        if not is_dev_or_admin(i.user):
-            return await i.response.send_message("❌ Developers / Admins only.", ephemeral=True)
-        if (i.guild.id, member.id) not in ACTIVE_MONITORS:
-            return await i.response.send_message(f"⚠️ {member.mention} has no active Phase 1–3 live monitor.", ephemeral=True)
-        await i.response.send_message(f"📊 Grading {member.mention} and transmitting dossier to Developers...", ephemeral=True)
-        asyncio.create_task(finish_monitor_and_report(bot, i.guild, member.id, notify_ch=i.channel))
-
-    @bot.tree.command(name="candidate_status", description="Check a candidate's passed phases and graded exam history")
-    async def s_stat(i: discord.Interaction, member: discord.Member):
-        if not is_dev_or_admin(i.user):
-            return await i.response.send_message("❌ Developers / Admins only.", ephemeral=True)
-        cand = gcfg(i.guild.id)["candidates"].get(str(member.id))
-        if not cand:
-            return await i.response.send_message(f"📋 No exam history found for {member.mention}.", ephemeral=True)
-        passed = ", ".join(f"`{x}`" for x in cand["passed"]) or "*None approved yet*"
-        hist = "\n".join(f"• **`{h['exam']}`** — `{h['score']}%` ({h['verdict']}) <t:{h['ts']}:R>" for h in cand["history"][-8:]) or "*None*"
-        emb = discord.Embed(title=f"📁 Exam Record — {member.display_name}", color=discord.Color.blurple())
-        emb.set_thumbnail(url=member.display_avatar.url)
-        emb.add_field(name="✅ Developer-Approved Tracks", value=passed, inline=False)
-        emb.add_field(name="📊 Recent Attempts", value=hist, inline=False)
-        await i.response.send_message(embed=emb, ephemeral=True)
-
-
-async def main():
-    global BOT_STATUS
-    await run_web()
-    asyncio.create_task(self_ping())
-    if not TOKEN:
-        BOT_STATUS = "MISSING BOT_TOKEN"
-        print("❌ ERROR: Add BOT_TOKEN in Environment Variables!")
-        while True:
-            await asyncio.sleep(3600)
-    mi, mei, w = True, True, 90
-    while True:
-        bot = ExamOverseerBot(mi, mei)
-        reg_cmds(bot)
-        try:
-            await bot.start(TOKEN)
-            break
-        except discord.PrivilegedIntentsRequired:
-            print("⚠️ Enable Message Content & Server Members Intents in Developer Portal!")
-            await bot.close()
-            if mei:
-                mei = False
-            elif mi:
-                mi = False
-            else:
-                await asyncio.sleep(60)
-        except discord.HTTPException as e:
-            await bot.close()
-            if e.status == 429:
-                BOT_STATUS = f"429 wait {w}s"
-                await asyncio.sleep(w)
-                w = min(w + 60, 300)
-            else:
-                await asyncio.sleep(60)
-        except Exception as e:
-            await bot.close()
-            BOT_STATUS = f"Retry ({type(e).__name__})"
-            await asyncio.sleep(60)
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
-    
-                  
-
-
-
+        return "❌ Bot needs **Manage Channels** permission!"
+
+    ACTIVE_TRIALS[tch.id] = {"guild_id": g.id, "user_id": u.id, "rank_key": rank_key, "q_idx": 0, "answers": [], "q_start": time.time(), "warnings": 0}
+
+    emb = discord.Embed(title=f"🔥 {title.upper()} — STARTING INTRODUCTION", description=f"👤 **Candidate:** {u.mention} (`{u.display_name}`)\n📋 **Questions:** `{len(qs)}` • ✍️ **Min:** `{min_w} words` • ✅ **Pass:** `{pass_pct}%`\n\n{intro}", color=col, timestamp=discord.utils.utcnow())
+    emb.set_author(name=f"Chicago Crossfire Management Trials — {u.display_name}", icon_url=u.display_avatar.url)
+    emb.set_thumbnail(url=u.display_avatar.url)
+    emb.set_footer(text="Type 'cancel' anytime to forfeit • Report goes straight to Developers & Chief Management")
+    await tch.send(content=u.mention, embed=emb)
+
+    q_emb = discord.Embed(title=f"📝 Question 1 of {len(qs)} — {title}", description=f"**{qs[0][0]}**", color=col)
+    q_emb.set_footer(text=f"Minimum {min_w} words required")
+    await tch.send(embed=q_emb)
+    return f"✅ **{title}** started for {u.mention}! Head into {tch.mention}."
