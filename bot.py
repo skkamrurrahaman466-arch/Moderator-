@@ -254,3 +254,354 @@ async def start_management_trial(g: discord.Guild, u: discord.Member, rank_key: 
     q_emb.set_footer(text=f"Minimum {min_w} words required")
     await tch.send(embed=q_emb)
     return f"✅ **{title}** started for {u.mention}! Head into {tch.mention}."
+
+# =====================================================================
+# PART 2 OF 2 — PASTE DIRECTLY BELOW PART 1 (AT THE FAR LEFT EDGE)
+# =====================================================================
+class VerdictView(discord.ui.View):
+    """1-tap Developer / Chief Manager verdict buttons for Phase Requests & Trials."""
+
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    def _meta(self, emb: discord.Embed):
+        ft = (emb.footer.text if emb and emb.footer else "") or ""
+        km, um = re.search(r"Track:([a-z0-9]+)", ft), re.search(r"UserID:(\d+)", ft)
+        return (km.group(1) if km else "phase"), (int(um.group(1)) if um else 0)
+
+    async def _act(self, i: discord.Interaction, label: str, col: discord.Color, passed: bool):
+        if not is_exec(i.user):
+            return await i.response.send_message("❌ Developers / Chief Management / Admins only.", ephemeral=True)
+        emb = i.message.embeds[0]
+        track, uid = self._meta(emb)
+        if passed and uid:
+            rec = gcfg(i.guild.id)["records"].setdefault(str(uid), [])
+            if track not in rec:
+                rec.append(track)
+                save_db()
+        for child in self.children:
+            child.disabled = True
+        emb.color = col
+        emb.add_field(name="🏛️ Official Decision", value=f"**{label}** by {i.user.mention}", inline=False)
+        await i.response.edit_message(embed=emb, view=self)
+        if uid:
+            try:
+                usr = i.guild.get_member(uid) or await i.client.fetch_user(uid)
+                await usr.send(f"🔥 **{i.guild.name} — Result for `{track.upper()}`:** {label} (Reviewed by {i.user.display_name})")
+            except Exception:
+                pass
+
+    @discord.ui.button(label="Approve / Pass", style=discord.ButtonStyle.success, emoji="✅", custom_id="mhv:pass")
+    async def b_pass(self, i: discord.Interaction, b: discord.ui.Button):
+        await self._act(i, "✅ APPROVED / PASSED", discord.Color.green(), True)
+
+    @discord.ui.button(label="Oral Board", style=discord.ButtonStyle.primary, emoji="🎙️", custom_id="mhv:oral")
+    async def b_oral(self, i: discord.Interaction, b: discord.ui.Button):
+        await self._act(i, "🎙️ ORAL BOARD REQUIRED", discord.Color.gold(), False)
+
+    @discord.ui.button(label="Fail", style=discord.ButtonStyle.danger, emoji="❌", custom_id="mhv:fail")
+    async def b_fail(self, i: discord.Interaction, b: discord.ui.Button):
+        await self._act(i, "❌ FAILED", discord.Color.dark_red(), False)
+
+
+class TrialSelect(discord.ui.Select):
+    """Dropdown for Manager, Senior Manager, Head Manager & Chief Manager Trials."""
+
+    def __init__(self):
+        opts = [
+            discord.SelectOption(label="Manager Trial (3Q)", value="manager", emoji="📋", description="Pass: 80% • Day-to-day staff leadership"),
+            discord.SelectOption(label="Senior Manager Trial (4Q)", value="senior", emoji="⭐", description="Pass: 85% • Overseeing Managers & bias checks"),
+            discord.SelectOption(label="Head Manager Trial (4Q)", value="head", emoji="👑", description="Pass: 88% • Division command & crisis defense"),
+            discord.SelectOption(label="Chief Manager Trial — HELL MODE (5Q)", value="chief", emoji="🔥", description="Pass: 92% • Brutal executive gauntlet"),
+        ]
+        super().__init__(placeholder="👑 Choose a Management Trial to Start...", options=opts, custom_id="mht:sel")
+
+    async def callback(self, i: discord.Interaction):
+        await i.response.defer(ephemeral=True)
+        await i.followup.send(await start_management_trial(i.guild, i.user, self.values[0]), ephemeral=True)
+
+
+class TrialPanelView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(TrialSelect())
+
+
+class SupportModal(discord.ui.Modal):
+    """Intake form for Management Support tickets."""
+
+    def __init__(self, key: str):
+        title, _, emoji, _, _ = SUPPORT_CATS[key]
+        super().__init__(title=f"{emoji} {title}"[:45])
+        self.key = key
+        self.rblx = discord.ui.TextInput(label="Roblox Username", required=True, max_length=50)
+        self.info = discord.ui.TextInput(label="Details / Evidence", style=discord.TextStyle.paragraph, required=True, max_length=800)
+        self.add_item(self.rblx)
+        self.add_item(self.info)
+
+    async def on_submit(self, i: discord.Interaction):
+        await i.response.defer(ephemeral=True)
+        g, u, c = i.guild, i.user, gcfg(i.guild.id)
+        title, pfx, emoji, col, tip = SUPPORT_CATS[self.key]
+        cat = g.get_channel(c["cat_id"])
+        cat = cat if isinstance(cat, discord.CategoryChannel) else None
+
+        ow = {
+            g.default_role: discord.PermissionOverwrite(view_channel=False),
+            u: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, attach_files=True),
+            g.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_channels=True, read_message_history=True),
+        }
+        for rid in (c["mgmt_role"], c["chief_role"], c["dev_role"]):
+            role = g.get_role(rid)
+            if role:
+                ow[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
+
+        safe = re.sub(r"[^a-z0-9-]", "", u.name.lower())[:14] or "user"
+        try:
+            tch = await g.create_text_channel(name=f"{pfx}-{safe}", category=cat, overwrites=ow, topic=f"MgmtTicket | Type:{self.key} | UserID:{u.id}")
+        except discord.Forbidden:
+            return await i.followup.send("❌ Missing **Manage Channels** permission!", ephemeral=True)
+
+        # Smart On-Call Ping: pings On-Call Managers (or Chief role for executive tickets)
+        if self.key == "exec" and c["chief_role"]:
+            ping = f"<@&{c['chief_role']}>"
+        elif c["oncall"]:
+            ping = " ".join(f"<@{uid}>" for uid in c["oncall"][:10])
+        elif c["mgmt_role"]:
+            ping = f"<@&{c['mgmt_role']}>"
+        else:
+            ping = "**Management**"
+
+        emb = discord.Embed(title=f"{emoji} {title}", description=f"Welcome {u.mention}! {tip}", color=col, timestamp=discord.utils.utcnow())
+        emb.set_thumbnail(url=u.display_avatar.url)
+        emb.add_field(name="🎮 Roblox User", value=f"`{self.rblx.value}`", inline=True)
+        emb.add_field(name="🙋‍♂️ Claimed By", value="*Unclaimed*", inline=True)
+        emb.add_field(name="📝 Details", value=self.info.value, inline=False)
+        await tch.send(content=f"{u.mention} {ping}", embed=emb, view=TicketCtrlView())
+        await i.followup.send(f"✅ Support ticket created: {tch.mention}", ephemeral=True)
+
+
+class CloseModal(discord.ui.Modal, title="🔒 Close Management Ticket"):
+    reason = discord.ui.TextInput(label="Closing Reason", default="Issue resolved", required=True, max_length=250)
+
+    async def on_submit(self, i: discord.Interaction):
+        await close_support_ticket(i, self.reason.value)
+
+
+class TicketCtrlView(discord.ui.View):
+    """Persistent Claim, Escalate to Chief & Close buttons inside Management Support tickets."""
+
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Claim", style=discord.ButtonStyle.success, emoji="🙋‍♂️", custom_id="mhtc:clm")
+    async def b_clm(self, i: discord.Interaction, b: discord.ui.Button):
+        if not is_mgmt(i.user):
+            return await i.response.send_message("❌ Management only.", ephemeral=True)
+        b.disabled, b.label = True, f"Claimed by {i.user.display_name}"[:75]
+        emb = i.message.embeds[0] if i.message.embeds else None
+        if emb and len(emb.fields) > 1:
+            emb.set_field_at(1, name="🙋‍♂️ Claimed By", value=i.user.mention, inline=True)
+            await i.response.edit_message(embed=emb, view=self)
+        else:
+            await i.response.edit_message(view=self)
+        await i.channel.send(f"✅ {i.user.mention} has claimed this support ticket!")
+
+    @discord.ui.button(label="Escalate (Chief)", style=discord.ButtonStyle.primary, emoji="⬆️", custom_id="mhtc:esc")
+    async def b_esc(self, i: discord.Interaction, b: discord.ui.Button):
+        if not is_mgmt(i.user):
+            return await i.response.send_message("❌ Management only.", ephemeral=True)
+        b.disabled, b.label = True, "Escalated 🔴"
+        await i.response.edit_message(view=self)
+        cid = gcfg(i.guild.id)["chief_role"]
+        await i.channel.send(f"🚨 {f'<@&{cid}>' if cid else '**Chief Management**'} — Ticket escalated by {i.user.mention}!")
+
+    @discord.ui.button(label="Close & DM", style=discord.ButtonStyle.danger, emoji="🔒", custom_id="mhtc:cls")
+    async def b_cls(self, i: discord.Interaction, b: discord.ui.Button):
+        if not (is_mgmt(i.user) or f"UserID:{i.user.id}" in (i.channel.topic or "")):
+            return await i.response.send_message("❌ Management or opener only.", ephemeral=True)
+        await i.response.send_modal(CloseModal())
+
+
+class SupportPanelView(discord.ui.View):
+    """4-button Management Support Ticket Center."""
+
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Management Support", style=discord.ButtonStyle.primary, emoji="💬", custom_id="mhsp:gen", row=0)
+    async def b1(self, i: discord.Interaction, b: discord.ui.Button): await i.response.send_modal(SupportModal("general"))
+
+    @discord.ui.button(label="Staff / Manager Report", style=discord.ButtonStyle.danger, emoji="🚨", custom_id="mhsp:rep", row=0)
+    async def b2(self, i: discord.Interaction, b: discord.ui.Button): await i.response.send_modal(SupportModal("report"))
+
+    @discord.ui.button(label="Partnership / Faction", style=discord.ButtonStyle.success, emoji="🤝", custom_id="mhsp:par", row=1)
+    async def b3(self, i: discord.Interaction, b: discord.ui.Button): await i.response.send_modal(SupportModal("partner"))
+
+    @discord.ui.button(label="Chief Manager Escalation", style=discord.ButtonStyle.secondary, emoji="👑", custom_id="mhsp:exc", row=1)
+    async def b4(self, i: discord.Interaction, b: discord.ui.Button): await i.response.send_modal(SupportModal("exec"))
+
+
+# --- 5. BOT CORE, CHAT LISTENERS & SLASH COMMANDS ---
+class ManagementHubBot(commands.Bot):
+    def __init__(self, mi: bool = True):
+        it = discord.Intents.default()
+        it.message_content = mi
+        super().__init__(command_prefix="!", intents=it, help_command=None)
+        self._synced = False
+
+    async def setup_hook(self):
+        for v in (VerdictView(), TrialPanelView(), SupportPanelView(), TicketCtrlView()):
+            self.add_view(v)
+        if not self._synced:
+            try:
+                await self.tree.sync()
+                self._synced = True
+            except Exception as e:
+                print(f"Sync: {e}")
+
+    async def on_ready(self):
+        global STATUS
+        STATUS = f"ONLINE as {self.user}"
+        print(f"✅ Combined Management Hub Bot ONLINE as {self.user}")
+        try:
+            await self.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name="Phases, Trials & Support 🔥"))
+        except Exception:
+            pass
+
+    async def on_message(self, msg: discord.Message):
+        if msg.author.bot or not msg.guild:
+            return
+        await self.process_commands(msg)
+
+        # 1. Active Management Trial Room Listener
+        sess = ACTIVE_TRIALS.get(msg.channel.id)
+        if sess and msg.author.id == sess["user_id"]:
+            txt = (msg.content or "").strip()
+            if not txt:
+                return
+            if txt.lower() in ("cancel", "quit", "forfeit"):
+                ACTIVE_TRIALS.pop(msg.channel.id, None)
+                await msg.channel.send("🛑 Trial cancelled. Closing room in 5s...")
+                await asyncio.sleep(5)
+                try:
+                    await msg.channel.delete(reason="Trial cancelled")
+                except Exception:
+                    pass
+                return
+
+            title, pass_pct, min_w, col, _, qs = TRIALS[sess["rank_key"]]
+            words = len(txt.split())
+            if words < min_w:
+                sess["warnings"] += 1
+                if sess["warnings"] >= 3:
+                    ACTIVE_TRIALS.pop(msg.channel.id, None)
+                    await msg.channel.send("❌ **Auto-Failed:** 3x short answers. Closing room in 6s...")
+                    await asyncio.sleep(6)
+                    try:
+                        await msg.channel.delete(reason="Auto-failed short answers")
+                    except Exception:
+                        pass
+                    return
+                return await msg.reply(f"⚠️ Too short (`{words}/{min_w}` words). Write a detailed answer *(Warning `{sess['warnings']}/3`)*.")
+
+            sess["answers"].append({"text": txt[:1500], "sec": time.time() - sess["q_start"]})
+            sess["q_idx"] += 1
+            try:
+                await msg.add_reaction("✅")
+            except Exception:
+                pass
+
+            if sess["q_idx"] < len(qs):
+                sess["q_start"] = time.time()
+                q_emb = discord.Embed(title=f"📝 Question {sess['q_idx']+1} of {len(qs)} — {title}", description=f"**{qs[sess['q_idx']][0]}**", color=col)
+                q_emb.set_footer(text=f"Minimum {min_w} words required")
+                return await msg.channel.send(embed=q_emb)
+
+            ACTIVE_TRIALS.pop(msg.channel.id, None)
+            pct, verdict, breakdown, raw = grade_trial(sess["rank_key"], sess["answers"])
+            c = gcfg(msg.guild.id)
+            log_ch = msg.guild.get_channel(c["log_ch"])
+            ping = f"<@&{c['dev_role']}>" if c["dev_role"] else "**Developers**"
+            rep = discord.Embed(title=f"📊 MANAGEMENT TRIAL REPORT — {title}", description=f"👤 **Candidate:** {msg.author.mention}\n🎯 **Score:** **`{pct}%`** *(Pass: `{pass_pct}%`)* • ⚖️ **Verdict:** **`{verdict}`**", color=discord.Color.green() if verdict == "PASS" else discord.Color.red(), timestamp=discord.utils.utcnow())
+            rep.set_thumbnail(url=msg.author.display_avatar.url)
+            rep.add_field(name="📝 Question Breakdown", value="\n".join(f"• {x}" for x in breakdown), inline=False)
+            rep.set_footer(text=f"Track:{sess['rank_key']} | UserID:{msg.author.id}")
+            if log_ch:
+                try:
+                    await log_ch.send(content=f"📣 {ping} — New **{title}** graded!", embed=rep, file=discord.File(io.BytesIO(raw), filename=f"trial-{sess['rank_key']}-{msg.author.id}.txt"), view=VerdictView())
+                except Exception:
+                    pass
+            await msg.channel.send(f"✅ **Trial Complete!** Score: **`{pct}%`** (`{verdict}`). Report sent to Developers! Closing in 10s...")
+            await asyncio.sleep(10)
+            try:
+                await msg.channel.delete(reason="Management trial complete")
+            except Exception:
+                pass
+            return
+
+        # 2. Simple Chat Phase & Trial Request Listener (Name: @user / Phase: 1-5 or Manager / @Bot)
+        if self.user in msg.mentions:
+            clean = re.sub(rf"<@!?{self.user.id}>", "", msg.content or "").strip()
+            low = clean.lower()
+            other = [m for m in msg.mentions if m.id != self.user.id]
+            cand = other[0] if other else msg.author
+
+            for key, kw in (("chief", "chief"), ("head", "head"), ("senior", "senior"), ("manager", "manager")):
+                if kw in low:
+                    return await msg.reply(await start_management_trial(msg.guild, cand, key))
+
+            pm = re.search(r"phase\s*[:\-]?\s*([1-5])", low)
+            if not pm:
+                return await msg.reply(f"📋 **Request Format:**\n```\nName: @user\nPhase: 1 / 2 / 3 / 4 / 5  (or Manager / Senior / Head / Chief Manager)\n@{self.user.display_name}\n```")
+
+            pkey = f"phase{pm.group(1)}"
+            ptitle, pdesc, pcol = PHASE_INTROS[pkey]
+            emb = discord.Embed(title=f"🔥 {ptitle} — STARTING MESSAGE", description=f"👤 **Candidate:** {cand.mention} (`{cand.display_name}`)\n📨 **Requested By:** {msg.author.mention}\n\n{pdesc}", color=pcol, timestamp=discord.utils.utcnow())
+            emb.set_author(name=f"Chicago Crossfire Phase Request — {cand.display_name}", icon_url=cand.display_avatar.url)
+            emb.set_thumbnail(url=cand.display_avatar.url)
+            emb.set_footer(text=f"Track:{pkey} | UserID:{cand.id} • Developers: Approve or Fail below")
+            try:
+                await msg.add_reaction("✅")
+            except Exception:
+                pass
+            await msg.reply(content=f"📣 {cand.mention} — **Phase Request Logged!**", embed=emb, view=VerdictView())
+
+            log_ch = msg.guild.get_channel(gcfg(msg.guild.id)["log_ch"])
+            if log_ch and log_ch.id != msg.channel.id:
+                dev_p = f"<@&{gcfg(msg.guild.id)['dev_role']}>" if gcfg(msg.guild.id)["dev_role"] else "**Developers**"
+                try:
+                    await log_ch.send(content=f"📣 {dev_p} — New Phase Request by {cand.mention}!", embed=emb, view=VerdictView())
+                except Exception:
+                    pass
+
+
+def reg_cmds(bot: ManagementHubBot):
+    @bot.tree.command(name="setup", description="One-time setup for Developers, Management, Chief Role, Log Channel & Ticket Category")
+    async def s_setup(i: discord.Interaction, dev_role: discord.Role, manager_role: discord.Role, chief_role: discord.Role, log_channel: discord.TextChannel, category: discord.CategoryChannel):
+        if not i.user.guild_permissions.administrator:
+            return await i.response.send_message("❌ Administrators only.", ephemeral=True)
+        gcfg(i.guild.id).update({"dev_role": dev_role.id, "mgmt_role": manager_role.id, "chief_role": chief_role.id, "log_ch": log_channel.id, "cat_id": category.id})
+        save_db()
+        await i.response.send_message(f"✅ **Management Hub Configured!**\n🛠️ Devs: {dev_role.mention} | 📋 Managers: {manager_role.mention} | 👑 Chief: {chief_role.mention}\n📜 Logs: {log_channel.mention} | 📁 Category: `{category.name}`\n👉 Run `/phase_panel`, `/trial_panel`, and `/support_panel`!", ephemeral=True)
+
+    @bot.tree.command(name="phase_panel", description="Post the Simple Phase Requests guide panel")
+    async def s_pp(i: discord.Interaction):
+        if not is_mgmt(i.user):
+            return await i.response.send_message("❌ Management only.", ephemeral=True)
+        emb = discord.Embed(title="🔥 SIMPLE PHASE REQUESTS", description=f"Type this format in chat to start your phase:\n```\nName: @user\nPhase: 1 / 2 / 3 / 4 / 5\n@{bot.user.display_name}\n```\n*Sends your Starting Intro with your avatar and notifies Developers automatically!*", color=discord.Color.from_rgb(220, 53, 69))
+        await i.response.send_message(embed=emb)
+
+    @bot.tree.command(name="trial_panel", description="Post the Manager, Senior, Head & Chief Manager Trials panel")
+    async def s_tp(i: discord.Interaction):
+        if not is_mgmt(i.user):
+            return await i.response.send_message("❌ Management only.", ephemeral=True)
+        emb = discord.Embed(title="👑 MANAGEMENT TRIALS CENTER", description="Select your target rank below to open a private, auto-graded trial room:\n\n📋 **Manager Trial** (3Q • `80%`)\n⭐ **Senior Manager Trial** (4Q • `85%`)\n👑 **Head Manager Trial** (4Q • `88%`)\n🔥 **Chief Manager Trial — HELL MODE** (5Q • `92%`)", color=discord.Color.dark_red())
+        await i.response.send_message(embed=emb, view=TrialPanelView())
+
+    @bot.tree.command(name="support_panel", description="Post the Management Support Ticket Center")
+    async def s_sp(i: discord.Interaction):
+        if not is_mgmt(i.user):
+            return await i.response.send_message("❌ Management only.", ephemeral=True)
+        n_on = len(gcfg(i.guild.id)["oncall"])
+        emb = discord.Embed(title="🎧 MANAGEMENT SUPPORT CENTER", description=f"Need Management assistance? Pick a category below to open a private ticket!\n\n🟢 **M
